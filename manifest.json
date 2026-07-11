@@ -1,0 +1,28 @@
+{
+    "format_version": 2,
+    "header": {
+        "name": "Vinny's Anticheat",
+        "description": "Prevents duplication exploits and illegal items",
+        "uuid": "f50734c3-afc5-4950-8923-631a9492fdb7",
+        "version": [1, 3, 58],
+        "min_engine_version": [1, 21, 130]
+    },
+    "modules": [
+        {
+            "type": "script",
+            "language": "javascript",
+            "uuid": "b0c9505e-0197-4a65-89f9-36e41443e0a1",
+            "entry": "scripts/main.js",
+            "version": [1, 3, 58]
+        }
+    ],
+    "dependencies": [
+        {
+            "module_name": "@minecraft/server",
+            "version": "2.4.0"
+        }
+    ],
+    "metadata": {
+        "product_type": "addon"
+    }
+}
