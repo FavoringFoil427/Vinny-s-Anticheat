@@ -442,12 +442,12 @@ async function openMainMenu(player) {
 async function openTogglesMenu(player) {
     const form = new ModalFormData()
         .title("Protection Toggles")
-        .toggle("Bundle/Shulker Box Blocking", getBundleBlockingSetting())
-        .toggle("Inventory Sync", getInventorySyncSetting())
-        .toggle("Illegal Item Detection", getIllegalItemsSetting())
-        .toggle("Banned Block Detection", getBannedBlocksSetting())
-        .toggle("Bedrock Break Protection", getBedrockProtectionSetting())
-        .toggle("Minecart Chest Dupe Detection", getMinecartProtectionSetting());
+        .toggle("Bundle/Shulker Box Blocking", { defaultValue: getBundleBlockingSetting() })
+        .toggle("Inventory Sync", { defaultValue: getInventorySyncSetting() })
+        .toggle("Illegal Item Detection", { defaultValue: getIllegalItemsSetting() })
+        .toggle("Banned Block Detection", { defaultValue: getBannedBlocksSetting() })
+        .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
+        .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() });
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
     const v = res.formValues;
@@ -583,7 +583,7 @@ async function openWhitelistMenu(player) {
         }
         case 3: {
             if (list.length === 0) { player.sendMessage("§e[Anticheat]§r Whitelist is empty."); break; }
-            const modal = new ModalFormData().title("Remove from Whitelist").dropdown("Select item", list, 0);
+            const modal = new ModalFormData().title("Remove from Whitelist").dropdown("Select item", list, { defaultValueIndex: 0 });
             const m = await showForm(player, modal);
             if (m && !m.canceled) {
                 const target = list[m.formValues[0]];

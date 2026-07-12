@@ -25,11 +25,11 @@ Minecraft version and are the only things I can't test without the game):
    fails to load with a module/dependency error, change this to the server-ui
    version your Minecraft build ships (e.g. `2.0.0`) — match whatever your other
    working script packs use.
-2. The form widget calls use the positional signature
-   (`.toggle(label, defaultBool)`, `.textField(label, placeholder)`,
-   `.dropdown(label, options, defaultIndex)`), which is the broadly-compatible
-   form. If a form throws, your version may expect the newer options-object
-   overload instead.
+2. The form widgets use the newer options-object signature this build requires
+   (`.toggle(label, { defaultValue })`, `.dropdown(label, options,
+   { defaultValueIndex })`). `.textField(label, placeholder)` keeps its
+   positional placeholder. If you ever downgrade to an older Minecraft build
+   that rejects the options object, switch these back to positional values.
 
 ## Bugs / problems fixed in this pass
 
