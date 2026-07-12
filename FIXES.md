@@ -2,6 +2,23 @@
 
 Review of `scripts/main.js` (behavior pack, `@minecraft/server` 2.4.0).
 
+## Admin-only alerts & auto-escalation (new)
+
+**Admin-only alerts.** `broadcastAlert` no longer always uses `world.sendMessage`.
+When the "Admin-Only Alerts" setting is on, alerts (including the coordinates
+they contain) are sent only to players with the `admin` tag, so exploiters and
+bystanders aren't tipped off. Toggle it in the panel or with `/cheats:alerts`.
+Defaults to off (public) to preserve the original behaviour.
+
+**Auto-escalation.** The `dupe_log` attempt counter now drives enforcement.
+Set a threshold (panel slider, or `/cheats:escalate <n>`, `0` = off). When a
+player's attempt count reaches the threshold they are tagged `cheats:flagged`
+and admins get a one-time ESCALATION notice; if "Kick at threshold" is enabled
+they are also kicked (via an operator-level `kick` command). The flag tag stops
+it re-firing on every later attempt, and clearing that player's log (or the
+whole log) removes the flag so they get a clean slate. Admins can select
+players tagged `cheats:flagged` for follow-up.
+
 ## `/cheats:ui` control panel (new)
 
 Typing `/cheats:ui` now opens an on-screen form-based control panel (built on
@@ -94,6 +111,9 @@ rejoin. See recommendation #4 for capping that persisted data.
 ---
 
 ## Recommendations to add / improve
+
+> ✅ Admin-only alert routing and auto-escalation for repeat offenders are now
+> implemented — see the sections near the top of this file.
 
 1. **Move from polling to event-driven detection where possible.** The cube
    sweeps run every 10–20 ticks regardless of whether anything changed. Hooking

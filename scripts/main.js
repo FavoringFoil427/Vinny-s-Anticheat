@@ -25,7 +25,9 @@ function recordDupeAttempt(player) {
         if (!objective) return;
         let current = 0;
         try { current = objective.getScore(player.name) ?? 0; } catch (e) {}
-        objective.setScore(player.name, current + 1);
+        const newCount = current + 1;
+        objective.setScore(player.name, newCount);
+        try { checkEscalation(player, newCount); } catch (e) {}
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe attempt: ${e}`); }
 }
 
@@ -59,6 +61,7 @@ function clearDupeLog() {
         const objective = world.scoreboard.getObjective(DUPE_LOG_OBJECTIVE);
         if (!objective) return;
         for (const p of objective.getParticipants()) { try { objective.removeParticipant(p); } catch (e) {} }
+        for (const pl of world.getPlayers()) { try { pl.removeTag(FLAGGED_TAG); } catch (e) {} }
     } catch (e) {}
 }
 
@@ -73,6 +76,7 @@ function clearDupeLogEntry(playerName) {
                 if (p.displayName === playerName) { objective.removeParticipant(p); break; }
             }
         } catch (e) {}
+        removeFlag(playerName);
         return existed;
     } catch (e) { return false; }
 }
@@ -127,7 +131,18 @@ function isWhitelisted(typeId) {
 
 // --- ALERT ---
 function broadcastAlert(message) {
-    world.sendMessage(`§l§e[Anticheat] §c§lALERT: §f${message}`);
+    const full = `§l§e[Anticheat] §c§lALERT: §f${message}`;
+    if (getAdminOnlyAlerts()) {
+        for (const p of world.getPlayers()) { if (p.hasTag("admin")) p.sendMessage(full); }
+    } else {
+        world.sendMessage(full);
+    }
+}
+
+// Escalation / severe notices always go to admins regardless of the alert mode.
+function notifyAdmins(message) {
+    const full = `§l§e[Anticheat] §c§lESCALATION: §f${message}`;
+    for (const p of world.getPlayers()) { if (p.hasTag("admin")) p.sendMessage(full); }
 }
 
 // --- SETTINGS ---
@@ -137,6 +152,10 @@ const ILLEGAL_ITEMS_PROPERTY = "cheats:illegalItems";
 const BANNED_BLOCKS_PROPERTY = "cheats:bannedBlocks";
 const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
 const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
+const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
+const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
+const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
+const FLAGGED_TAG = "cheats:flagged";
 
 function getBundleBlockingSetting() { return world.getDynamicProperty(BUNDLE_BLOCK_PROPERTY) ?? true; }
 function setBundleBlockingSetting(v) { world.setDynamicProperty(BUNDLE_BLOCK_PROPERTY, v); }
@@ -150,6 +169,39 @@ function getBedrockProtectionSetting() { return world.getDynamicProperty(BEDROCK
 function setBedrockProtectionSetting(v) { world.setDynamicProperty(BEDROCK_PROTECTION_PROPERTY, v); }
 function getMinecartProtectionSetting() { return world.getDynamicProperty(MINECART_PROTECTION_PROPERTY) ?? true; }
 function setMinecartProtectionSetting(v) { world.setDynamicProperty(MINECART_PROTECTION_PROPERTY, v); }
+function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
+function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
+function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
+function setEscalationThreshold(v) { world.setDynamicProperty(ESCALATION_THRESHOLD_PROPERTY, v); }
+function getEscalationKick() { return world.getDynamicProperty(ESCALATION_KICK_PROPERTY) ?? false; }
+function setEscalationKick(v) { world.setDynamicProperty(ESCALATION_KICK_PROPERTY, v); }
+
+// Called after an attempt count is incremented. Once a player crosses the
+// configured threshold they are flagged (tag) and admins are notified once;
+// if kick-on-threshold is enabled the player is also kicked. The flag tag
+// prevents this from re-firing every subsequent attempt until the log is
+// cleared for that player.
+function checkEscalation(player, newCount) {
+    const threshold = getEscalationThreshold();
+    if (threshold <= 0 || newCount < threshold) return;
+    if (player.hasTag(FLAGGED_TAG)) return;
+    try { player.addTag(FLAGGED_TAG); } catch (e) {}
+    const kick = getEscalationKick();
+    notifyAdmins(`§e${player.name}§f reached §c${newCount}§f attempts — ${kick ? "§ckicking" : "§eflagged"}§f.`);
+    if (kick) {
+        const cmd = `kick "${player.name}" Anticheat: repeated dupe/exploit attempts`;
+        try { player.dimension.runCommand(cmd); }
+        catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
+    }
+}
+
+// Remove the escalation flag from a player (by name) if they are online, so
+// clearing their log gives them a clean slate.
+function removeFlag(playerName) {
+    for (const p of world.getPlayers()) {
+        if (p.name === playerName) { try { p.removeTag(FLAGGED_TAG); } catch (e) {} }
+    }
+}
 
 // --- COMMANDS ---
 system.beforeEvents.startup.subscribe((init) => {
@@ -171,6 +223,8 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bannedblocks §7- Toggle Banned Block Detection\n`;
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
+                msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
+                msg += `  §f/cheats:escalate [n] §7- Set auto-flag/kick threshold (0=off)\n`;
                 msg += `\n§aInfo:§r\n`;
                 msg += `  §f/cheats:ui §7- Open the control panel (operators)\n`;
                 msg += `  §f/cheats:status §7- View all toggle states\n`;
@@ -202,7 +256,9 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Illegal Item Detection: ${getIllegalItemsSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Banned Block Detection: ${getBannedBlocksSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n`
+                    `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}§r\n`
                 );
             });
             return { status: 0 };
@@ -265,6 +321,36 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getMinecartProtectionSetting(); setMinecartProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Minecart Dupe Detection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:alerts", description: "Toggle admin-only alerts", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getAdminOnlyAlerts(); setAdminOnlyAlerts(v); player.sendMessage(`§e[Anticheat]§r Admin-Only Alerts: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:escalate", description: "Set auto-escalation threshold (0 = off)", permissionLevel: CommandPermissionLevel.GameDirectors,
+          optionalParameters: [{ name: "threshold", type: CustomCommandParamType.Integer }] },
+        (origin, threshold) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (threshold === undefined || threshold === null) {
+                    const t = getEscalationThreshold();
+                    player.sendMessage(`§e[Anticheat]§r Auto-escalation: ${t > 0 ? `§aAt ${t} attempts (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}`);
+                    return;
+                }
+                const t = Math.max(0, Math.floor(threshold));
+                setEscalationThreshold(t);
+                player.sendMessage(`§e[Anticheat]§r Auto-escalation threshold set to §a${t}§r${t === 0 ? " §7(disabled)" : ""}.`);
+            });
             return { status: 0 };
         }
     );
@@ -425,7 +511,7 @@ async function openMainMenu(player) {
         .title("Vinny's Anticheat")
         .body("Select an option:");
     const actions = [];
-    form.button("Protection Toggles");
+    form.button("Settings & Toggles");
     actions.push(openTogglesMenu);
     if (isAdmin) {
         form.button("Dupe Log");        actions.push(openDupeLogMenu);
@@ -441,13 +527,16 @@ async function openMainMenu(player) {
 
 async function openTogglesMenu(player) {
     const form = new ModalFormData()
-        .title("Protection Toggles")
+        .title("Settings")
         .toggle("Bundle/Shulker Box Blocking", { defaultValue: getBundleBlockingSetting() })
         .toggle("Inventory Sync", { defaultValue: getInventorySyncSetting() })
         .toggle("Illegal Item Detection", { defaultValue: getIllegalItemsSetting() })
         .toggle("Banned Block Detection", { defaultValue: getBannedBlocksSetting() })
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
-        .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() });
+        .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() })
+        .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
+        .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
+        .toggle("Kick at threshold (off = flag only)", { defaultValue: getEscalationKick() });
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
     const v = res.formValues;
@@ -457,6 +546,9 @@ async function openTogglesMenu(player) {
     setBannedBlocksSetting(!!v[3]);
     setBedrockProtectionSetting(!!v[4]);
     setMinecartProtectionSetting(!!v[5]);
+    setAdminOnlyAlerts(!!v[6]);
+    setEscalationThreshold(Math.max(0, Math.floor(v[7] ?? 0)));
+    setEscalationKick(!!v[8]);
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
