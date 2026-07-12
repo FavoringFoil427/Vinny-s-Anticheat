@@ -1,4 +1,5 @@
 import { world, system, CommandPermissionLevel, CustomCommandParamType } from "@minecraft/server";
+import { ActionFormData, ModalFormData, MessageFormData, FormCancelationReason } from "@minecraft/server-ui";
 
 console.warn("[Vinny's Anticheat] Script loading...");
 
@@ -171,6 +172,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
                 msg += `\n§aInfo:§r\n`;
+                msg += `  §f/cheats:ui §7- Open the control panel (operators)\n`;
                 msg += `  §f/cheats:status §7- View all toggle states\n`;
                 msg += `  §f/cheats:help §7- Show this list\n`;
                 if (isAdmin) {
@@ -386,7 +388,215 @@ system.beforeEvents.startup.subscribe((init) => {
             return { status: 0 };
         }
     );
+
+    registry.registerCommand(
+        { name: "cheats:ui", description: "Open the Anticheat control panel", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            // Forms cannot be shown from the read-only command context, so defer
+            // to the next tick. openMainMenu retries past the initial "UserBusy".
+            system.run(() => {
+                openMainMenu(player).catch((e) => console.warn(`[Anticheat] UI error: ${e}`));
+            });
+            return { status: 0 };
+        }
+    );
 });
+
+// --- UI CONTROL PANEL ---
+// Opening a form right after a command sometimes returns UserBusy (the chat is
+// still closing). Retry a few times before giving up.
+async function showForm(player, form) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        const response = await form.show(player);
+        if (response.canceled && response.cancelationReason === FormCancelationReason.UserBusy) {
+            await system.waitTicks(10);
+            continue;
+        }
+        return response;
+    }
+    return undefined;
+}
+
+async function openMainMenu(player) {
+    const isAdmin = player.hasTag("admin");
+    const form = new ActionFormData()
+        .title("Vinny's Anticheat")
+        .body("Select an option:");
+    const actions = [];
+    form.button("Protection Toggles");
+    actions.push(openTogglesMenu);
+    if (isAdmin) {
+        form.button("Dupe Log");        actions.push(openDupeLogMenu);
+        form.button("Player History");  actions.push(openHistoryPrompt);
+        form.button("Clear Log");       actions.push(openClearLogMenu);
+        form.button("Whitelist");       actions.push(openWhitelistMenu);
+    }
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const handler = actions[res.selection];
+    if (handler) await handler(player);
+}
+
+async function openTogglesMenu(player) {
+    const form = new ModalFormData()
+        .title("Protection Toggles")
+        .toggle("Bundle/Shulker Box Blocking", getBundleBlockingSetting())
+        .toggle("Inventory Sync", getInventorySyncSetting())
+        .toggle("Illegal Item Detection", getIllegalItemsSetting())
+        .toggle("Banned Block Detection", getBannedBlocksSetting())
+        .toggle("Bedrock Break Protection", getBedrockProtectionSetting())
+        .toggle("Minecart Chest Dupe Detection", getMinecartProtectionSetting());
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const v = res.formValues;
+    setBundleBlockingSetting(!!v[0]);
+    setInventorySyncSetting(!!v[1]);
+    setIllegalItemsSetting(!!v[2]);
+    setBannedBlocksSetting(!!v[3]);
+    setBedrockProtectionSetting(!!v[4]);
+    setMinecartProtectionSetting(!!v[5]);
+    player.sendMessage("§e[Anticheat]§r Settings updated.");
+}
+
+async function openDupeLogMenu(player) {
+    const entries = getDupeLogEntries();
+    const form = new ActionFormData().title("Dupe Log");
+    if (entries.length === 0) {
+        form.body("The dupe log is empty.").button("Back");
+        const r = await showForm(player, form);
+        if (r && !r.canceled) await openMainMenu(player);
+        return;
+    }
+    form.body(`${entries.length} player(s) logged. Select one to view history.`);
+    for (const e of entries) form.button(`${e.name}\n§7${e.count} attempt${e.count !== 1 ? "s" : ""}`);
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const chosen = entries[res.selection];
+    if (chosen) await showPlayerHistory(player, chosen.name);
+}
+
+async function showPlayerHistory(player, name) {
+    const history = getDupeHistory()[name];
+    const objective = world.scoreboard.getObjective(DUPE_LOG_OBJECTIVE);
+    let total = 0;
+    if (objective) { try { total = objective.getScore(name) ?? 0; } catch (e) {} }
+    let body;
+    if (!history || history.length === 0) {
+        body = `No history found for ${name}.`;
+    } else {
+        body = `§7Total attempts: ${total}§r\n`;
+        for (const h of history) body += `\n§e${h.timestamp}§r\n§fType: ${h.type}§r\n§fDimension: ${h.dimension}§r\n`;
+    }
+    const form = new ActionFormData().title(`History: ${name}`).body(body).button("Back");
+    const r = await showForm(player, form);
+    if (r && !r.canceled) await openMainMenu(player);
+}
+
+async function openHistoryPrompt(player) {
+    const form = new ModalFormData().title("Player History").textField("Player name", "Enter exact name");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const name = (res.formValues[0] || "").trim();
+    if (!name) { player.sendMessage("§e[Anticheat]§c No name entered."); return; }
+    await showPlayerHistory(player, name);
+}
+
+async function openClearLogMenu(player) {
+    const form = new ActionFormData()
+        .title("Clear Dupe Log")
+        .body("Choose what to clear:")
+        .button("Clear ALL")
+        .button("Clear a specific player")
+        .button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    if (res.selection === 0) {
+        const confirm = new MessageFormData()
+            .title("Confirm")
+            .body("Clear the ENTIRE dupe log? This cannot be undone.")
+            .button1("Cancel")
+            .button2("Clear ALL");
+        const c = await showForm(player, confirm);
+        if (c && !c.canceled && c.selection === 1) {
+            clearDupeLog(); clearDupeHistoryAll();
+            player.sendMessage("§e[Anticheat]§r Dupe log §acleared§r.");
+        }
+    } else if (res.selection === 1) {
+        const modal = new ModalFormData().title("Clear Player").textField("Player name", "Enter exact name");
+        const m = await showForm(player, modal);
+        if (m && !m.canceled) {
+            const name = (m.formValues[0] || "").trim();
+            if (!name) { player.sendMessage("§e[Anticheat]§c No name entered."); return; }
+            clearDupeLogEntry(name); clearDupeHistoryEntry(name);
+            player.sendMessage(`§e[Anticheat]§r Cleared log for §c${name}§r.`);
+        }
+    } else {
+        await openMainMenu(player);
+    }
+}
+
+async function openWhitelistMenu(player) {
+    const list = getItemWhitelist();
+    const form = new ActionFormData()
+        .title("Item Whitelist")
+        .body(list.length ? `${list.length} item(s) whitelisted.` : "Whitelist is empty.")
+        .button("View List")
+        .button("Add by ID")
+        .button("Add Item in Hand")
+        .button("Remove Item")
+        .button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    switch (res.selection) {
+        case 0: {
+            const body = list.length ? list.map((i) => `§f${i}`).join("\n") : "Whitelist is empty.";
+            const f = new ActionFormData().title("Whitelist").body(body).button("Back");
+            const r = await showForm(player, f);
+            if (r && !r.canceled) await openWhitelistMenu(player);
+            break;
+        }
+        case 1: {
+            const modal = new ModalFormData().title("Add to Whitelist").textField("Item ID", "e.g. diamond or minecraft:diamond");
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const raw = (m.formValues[0] || "").trim();
+                if (!raw) { player.sendMessage("§e[Anticheat]§c No item ID entered."); break; }
+                const normalized = raw.startsWith("minecraft:") ? raw : `minecraft:${raw}`;
+                const l = getItemWhitelist();
+                if (l.includes(normalized)) player.sendMessage("§e[Anticheat]§r Already whitelisted.");
+                else { l.push(normalized); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §a${normalized}§r added.`); }
+            }
+            break;
+        }
+        case 2: {
+            try {
+                const item = player.getComponent("equippable")?.getEquipment("Mainhand");
+                if (!item) { player.sendMessage("§e[Anticheat]§c You are not holding any item."); break; }
+                const normalized = item.typeId.startsWith("minecraft:") ? item.typeId : `minecraft:${item.typeId}`;
+                const l = getItemWhitelist();
+                if (l.includes(normalized)) player.sendMessage("§e[Anticheat]§r Already whitelisted.");
+                else { l.push(normalized); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §a${normalized}§r added.`); }
+            } catch (e) { player.sendMessage(`§e[Anticheat]§c Error: ${e}`); }
+            break;
+        }
+        case 3: {
+            if (list.length === 0) { player.sendMessage("§e[Anticheat]§r Whitelist is empty."); break; }
+            const modal = new ModalFormData().title("Remove from Whitelist").dropdown("Select item", list, 0);
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const target = list[m.formValues[0]];
+                const l = getItemWhitelist();
+                const i = l.indexOf(target);
+                if (i !== -1) { l.splice(i, 1); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §c${target}§r removed.`); }
+            }
+            break;
+        }
+        default:
+            await openMainMenu(player);
+    }
+}
 
 // --- ILLEGAL ITEMS DEFINITION ---
 const ILLEGAL_ITEMS = new Set([

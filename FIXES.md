@@ -2,6 +2,35 @@
 
 Review of `scripts/main.js` (behavior pack, `@minecraft/server` 2.4.0).
 
+## `/cheats:ui` control panel (new)
+
+Typing `/cheats:ui` now opens an on-screen form-based control panel (built on
+`@minecraft/server-ui`) that consolidates every existing control in one place:
+
+- **Protection Toggles** — a single screen with a switch for all six settings,
+  pre-filled with their current state; submit applies them all at once.
+- **Dupe Log** — browse logged players; select one to view their history.
+- **Player History** — look up any player by name.
+- **Clear Log** — clear everything (with a confirm prompt) or a single player.
+- **Whitelist** — view / add by ID / add item in hand / remove via dropdown.
+
+The panel opens at operator (`GameDirectors`) level, matching the toggle
+commands; the log/history/clear/whitelist sections only appear for players with
+the `admin` tag. The original text commands are all still registered and work
+unchanged — the UI is additive.
+
+**Two version-sensitive spots to verify in-game** (they depend on your exact
+Minecraft version and are the only things I can't test without the game):
+1. `manifest.json` declares `@minecraft/server-ui` version `2.1.0`. If the pack
+   fails to load with a module/dependency error, change this to the server-ui
+   version your Minecraft build ships (e.g. `2.0.0`) — match whatever your other
+   working script packs use.
+2. The form widget calls use the positional signature
+   (`.toggle(label, defaultBool)`, `.textField(label, placeholder)`,
+   `.dropdown(label, options, defaultIndex)`), which is the broadly-compatible
+   form. If a form throws, your version may expect the newer options-object
+   overload instead.
+
 ## Bugs / problems fixed in this pass
 
 ### 1. Ender chests were matched by the illegal-item container scanner
