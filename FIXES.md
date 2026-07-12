@@ -2,6 +2,35 @@
 
 Review of `scripts/main.js` (behavior pack, `@minecraft/server` 2.4.0).
 
+## Inventory Sync false positives on fast pickups (fixed)
+
+Players reported "tried to sync duplicated \<item\>" firing when they picked
+items up quickly during normal play. Two things combined to cause it:
+
+1. `savePlayerInventory` deliberately **delayed recording any inventory
+   increase by ~1 second** (a "pending" debounce). During that window the saved
+   baseline still held the *old, lower* counts.
+2. `runSpawnCheck` ran on **every** `playerSpawn` — including death-respawns,
+   not just rejoins — and deleted anything where the current count exceeded the
+   saved baseline.
+
+So a legit pickup that hadn't been committed yet (or any death-respawn shortly
+after gaining items) looked like surplus and got removed.
+
+**Fix:**
+- The snapshot is now written **immediately and undebounced** — the baseline
+  always matches the real online inventory, so freshly picked-up items are never
+  "unaccounted for." (Save interval relaxed from every 5 ticks to every 20,
+  since a once-per-second pre-disconnect snapshot is plenty and it cuts dynamic-
+  property writes.)
+- The dupe check now runs **only on an actual join/rejoin** (`initialSpawn`),
+  never on death-respawns or normal play. The inventory-sync exploit can only
+  add items while a player is *offline*, so rejoin is the only meaningful moment
+  to compare — which is exactly when the check now fires.
+
+Removed the now-unused `pendingUpdates` / `lastCommittedCounts` maps and their
+`playerLeave` cleanup.
+
 ## Admin-only alerts & auto-escalation (new)
 
 **Admin-only alerts.** `broadcastAlert` no longer always uses `world.sendMessage`.
@@ -103,10 +132,10 @@ rejoin. See recommendation #4 for capping that persisted data.
 - **Nearby-container detection attributes items to the closest player.** The
   illegal-container and minecart-dupe alerts blame whichever non-admin player
   is within range, which can flag innocent bystanders.
-- **Inventory-sync detection is heuristic.** The baseline is committed on a
-  timer, so a legitimate item pickup shortly before a respawn can be flagged
-  and removed. It ships **disabled by default** (`getInventorySyncSetting()`
-  defaults to `false`) for this reason.
+- **Inventory-sync detection is heuristic.** It compares your inventory on
+  rejoin against the last snapshot taken while you were online and removes any
+  surplus. It ships **disabled by default** (`getInventorySyncSetting()`
+  defaults to `false`). See the fix below for the false-positive cause.
 
 ---
 

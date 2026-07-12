@@ -834,44 +834,25 @@ function getPlayerInventoryMap(player) {
     return counts;
 }
 
-const pendingUpdates = new Map();
-const lastCommittedCounts = new Map();
-
+// Snapshot the player's live inventory. This is written continuously so that
+// when the player disconnects, the most recent snapshot reflects what they
+// legitimately held. It is intentionally NOT delayed/debounced: the baseline
+// must always match the real online inventory, otherwise items a player picks
+// up are briefly "unaccounted for" and get flagged as a dupe on the next spawn.
 function savePlayerInventory(player) {
     if (!getInventorySyncSetting()) return;
     try {
         const currentCounts = getPlayerInventoryMap(player);
-        const playerId = player.id;
-        if (!lastCommittedCounts.has(playerId)) {
-            const stored = world.getDynamicProperty(`dp_inv_${playerId}`);
-            lastCommittedCounts.set(playerId, stored ? JSON.parse(stored) : {});
-        }
-        const committed = lastCommittedCounts.get(playerId);
-        let hasIncrease = false;
-        for (const id in currentCounts) {
-            if ((currentCounts[id] || 0) > (committed[id] || 0)) { hasIncrease = true; break; }
-        }
-        if (hasIncrease) {
-            let pending = pendingUpdates.get(playerId);
-            if (pending && Date.now() - pending.timestamp > 1000) {
-                world.setDynamicProperty(`dp_inv_${playerId}`, JSON.stringify(currentCounts));
-                lastCommittedCounts.set(playerId, currentCounts);
-                pendingUpdates.delete(playerId);
-            } else if (!pending) {
-                pendingUpdates.set(playerId, { counts: currentCounts, timestamp: Date.now() });
-            }
-        } else {
-            world.setDynamicProperty(`dp_inv_${playerId}`, JSON.stringify(currentCounts));
-            lastCommittedCounts.set(playerId, currentCounts);
-            pendingUpdates.delete(playerId);
-        }
+        world.setDynamicProperty(`dp_inv_${player.id}`, JSON.stringify(currentCounts));
     } catch (e) {}
 }
 
+// Once per second is plenty to keep a fresh pre-disconnect snapshot, and it
+// avoids writing a dynamic property several times per second per player.
 system.runInterval(() => {
     if (!getInventorySyncSetting()) return;
     for (const player of world.getPlayers()) savePlayerInventory(player);
-}, 5);
+}, 20);
 
 function runSpawnCheck(player) {
     try {
@@ -915,16 +896,13 @@ function runSpawnCheck(player) {
 
 world.afterEvents.playerSpawn.subscribe((event) => {
     if (!getInventorySyncSetting()) return;
+    // Only check on an actual join/rejoin. Death-respawns and other spawns are
+    // normal play — checking them turns legitimate item pickups into false
+    // "dupe" removals. The inventory-sync exploit can only add items while the
+    // player is OFFLINE, so a rejoin is the only moment worth comparing.
+    if (!event.initialSpawn) return;
     const player = event.player;
     system.runTimeout(() => runSpawnCheck(player), 40);
-});
-
-// Drop per-player runtime caches when a player leaves so the Maps don't grow
-// unbounded. The persisted dp_inv_<id> property is intentionally kept so the
-// relog dupe check still has a baseline to compare against on rejoin.
-world.afterEvents.playerLeave.subscribe((event) => {
-    lastCommittedCounts.delete(event.playerId);
-    pendingUpdates.delete(event.playerId);
 });
 
 // --- ILLEGAL ITEMS: PLAYER INVENTORY SCAN ---
