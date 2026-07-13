@@ -31,6 +31,20 @@ after gaining items) looked like surplus and got removed.
 Removed the now-unused `pendingUpdates` / `lastCommittedCounts` maps and their
 `playerLeave` cleanup.
 
+### Teleport / chunk-reload hardening
+
+Teleporting (e.g. via a TP mod) reloads the player entity and surrounding
+chunks; during that window the inventory can briefly read **empty or partial**.
+If that transient read were saved as the baseline, the player's real items would
+look like a surplus "dupe" and be removed. Guards added:
+
+- `savePlayerInventory` now refuses to overwrite a good snapshot with a
+  suspicious shrink — an empty read over a non-empty baseline, or a >50% drop,
+  is skipped. Rationale: a stale-but-**higher** baseline is safe (it can only
+  ever miss a dupe, never invent one); a too-**low** baseline is what fabricates
+  false positives. It also bails if the inventory component isn't available yet.
+- `runSpawnCheck` skips entirely when the saved baseline is empty/untrusted.
+
 ## Admin-only alerts & auto-escalation (new)
 
 **Admin-only alerts.** `broadcastAlert` no longer always uses `world.sendMessage`.

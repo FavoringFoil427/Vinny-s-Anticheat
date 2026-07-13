@@ -834,15 +834,38 @@ function getPlayerInventoryMap(player) {
     return counts;
 }
 
-// Snapshot the player's live inventory. This is written continuously so that
-// when the player disconnects, the most recent snapshot reflects what they
-// legitimately held. It is intentionally NOT delayed/debounced: the baseline
-// must always match the real online inventory, otherwise items a player picks
-// up are briefly "unaccounted for" and get flagged as a dupe on the next spawn.
+function totalItems(counts) {
+    let total = 0;
+    for (const id in counts) total += counts[id];
+    return total;
+}
+
+// Snapshot the player's live inventory. Written continuously so the most recent
+// snapshot reflects what they legitimately held before a disconnect. Undebounced
+// so the baseline always matches the real online inventory.
+//
+// Teleport / chunk-reload hardening: while a player is being reloaded (a TP mod,
+// dimension change, or the chunk streaming back in) the inventory can briefly
+// read EMPTY or PARTIAL. If that transient read were saved as the baseline, the
+// player's real items would look like a surplus "dupe" moments later and get
+// deleted. So we never let a suspicious shrink overwrite a good snapshot: a
+// stale-but-higher baseline is safe (it can only miss a dupe, never invent one),
+// whereas a too-low baseline is exactly what fabricates false positives.
 function savePlayerInventory(player) {
     if (!getInventorySyncSetting()) return;
     try {
+        const container = player.getComponent("inventory")?.container;
+        if (!container) return; // entity mid-reload; not safe to snapshot
         const currentCounts = getPlayerInventoryMap(player);
+        const total = totalItems(currentCounts);
+        const prevRaw = world.getDynamicProperty(`dp_inv_${player.id}`);
+        if (prevRaw) {
+            const prevTotal = totalItems(JSON.parse(prevRaw));
+            // Empty read over a non-empty baseline, or a drastic (>50%) shrink,
+            // is almost always a transient reload rather than a real change.
+            if (prevTotal > 0 && total === 0) return;
+            if (prevTotal > 0 && total < prevTotal * 0.5) return;
+        }
         world.setDynamicProperty(`dp_inv_${player.id}`, JSON.stringify(currentCounts));
     } catch (e) {}
 }
@@ -860,10 +883,12 @@ function runSpawnCheck(player) {
         const savedStr = world.getDynamicProperty(`dp_inv_${player.id}`);
         if (!savedStr) return;
         const savedMap = JSON.parse(savedStr);
+        // No trustworthy baseline to compare against -> never flag.
+        if (totalItems(savedMap) === 0) return;
+        const container = player.getComponent("inventory")?.container;
+        if (!container) return; // still loading; re-checking later is safe
         const currentMap = getPlayerInventoryMap(player);
         let detectedDupe = false;
-        const container = player.getComponent("inventory")?.container;
-        if (!container) return;
         for (const typeId in currentMap) {
             const currentCount = currentMap[typeId];
             const savedCount = savedMap[typeId] || 0;
