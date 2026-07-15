@@ -9,17 +9,30 @@ it — a known Bedrock 1.21 glitch). Covered block-entities: **all shulker boxes
 chests, trapped chests, and barrels**. The pack's existing shulker blocking only
 scanned hoppers/dispensers/droppers/crafters, so this path was uncovered.
 
-There is **no cancellable piston event** (`pistonActivate` is after-only), so we
-react to it: the instant a piston is moving a shulker box, we remove the
-**piston** (and drop it back as an item so no block is lost) to break the
-contraption before it can be cycled to farm dupes. The nearest non-admin player
-is logged (`Piston Shulker Dupe`) and fed into the escalation system, and an
-alert + sound fire.
+Detection is primarily at **placement time** (`playerPlaceBlock`): the moment a
+piston is aimed at a container — or a container is placed in front of an already-
+aimed piston — the pack removes the **piston** (dropping it back as an item) and
+attributes it to the placing player (`Piston Dupe: <container>`), feeding the
+escalation system.
 
-Deliberately conservative: we only ever remove the **piston**, never the shulker
-box or its contents — so a false positive (a legit build that pushes a shulker,
-which is rare) costs at most one piston, never any items. Toggle with
-`/cheats:piston` or in the panel (default on).
+Why placement and not the piston push: there is no cancellable piston event, and
+during a push Bedrock swaps the moving block to `minecraft:moving_block`, so
+`pistonActivate.getAttachedBlocks()` can't reliably read the real block type.
+The `pistonActivate` handler is kept as a backstop, but placement detection is
+the reliable, correctly-attributed path.
+
+Deliberately conservative: we only ever remove the **piston**, never the
+container or its contents — so a false positive (a legit build aiming a piston at
+a chest/barrel, which is uncommon) costs at most one piston, never any items.
+Toggle with `/cheats:piston` or in the panel (default on).
+
+## Admin-tag gate on the `/cheats:ui` panel (fixed)
+
+`/cheats:ui` was open to any **operator**, so an opped player without the `admin`
+tag could open the panel and change settings. It now requires the `admin` tag
+(like the log/whitelist commands); non-admin operators get "No permission."
+Also, `checkEscalation` now exempts `admin`-tagged players entirely, so an admin
+testing detections can never auto-flag or auto-kick themselves.
 
 ## Inventory Sync false positives on fast pickups (fixed)
 

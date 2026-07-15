@@ -185,6 +185,7 @@ function setEscalationKick(v) { world.setDynamicProperty(ESCALATION_KICK_PROPERT
 // prevents this from re-firing every subsequent attempt until the log is
 // cleared for that player.
 function checkEscalation(player, newCount) {
+    if (player.hasTag("admin")) return; // never auto-flag/kick admins (e.g. while testing)
     const threshold = getEscalationThreshold();
     if (threshold <= 0 || newCount < threshold) return;
     if (player.hasTag(FLAGGED_TAG)) return;
@@ -491,13 +492,15 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
-        { name: "cheats:ui", description: "Open the Anticheat control panel", permissionLevel: CommandPermissionLevel.GameDirectors },
+        { name: "cheats:ui", description: "Open the Anticheat control panel (requires admin tag)", permissionLevel: CommandPermissionLevel.GameDirectors },
         (origin) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             // Forms cannot be shown from the read-only command context, so defer
             // to the next tick. openMainMenu retries past the initial "UserBusy".
             system.run(() => {
+                // Operator level alone is not enough — the panel is admin-tag gated.
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission. (requires admin tag)`); return; }
                 openMainMenu(player).catch((e) => console.warn(`[Anticheat] UI error: ${e}`));
             });
             return { status: 0 };
@@ -1032,13 +1035,18 @@ world.afterEvents.entityRemove.subscribe((event) => {
     system.runTimeout(() => recentMinecartBreaks.delete(key), 5000);
 });
 
-// --- PISTON SHULKER DUPE PROTECTION ---
-// Pushing shulker boxes with a piston is a known Bedrock duplication glitch.
-// There is no cancellable piston event, so we react to pistonActivate: the
-// instant a piston is moving a shulker box we pop the PISTON off (and return
-// it as an item so nobody loses a block) to break the contraption before it
-// can be cycled to farm dupes. We never touch the shulker box or its contents,
-// so a false positive costs at most one piston, never any items.
+// --- PISTON CONTAINER DUPE PROTECTION ---
+// Pushing a container block-entity (shulker box / chest / barrel) with a piston
+// is a known Bedrock duplication glitch. We break the setup by popping the
+// PISTON off (returned as an item so no block is lost) — never the container or
+// its contents, so a false positive costs at most one piston.
+//
+// Detection is primarily at PLACEMENT time (playerPlaceBlock): when a piston is
+// aimed at a container, or a container is placed in front of an aimed piston, we
+// remove the piston and attribute it to the placing player. This is reliable and
+// correctly attributed, unlike reading pistonActivate's attached blocks (during
+// a push Bedrock swaps the moving block to "minecraft:moving_block", so the real
+// type can't be read there). The pistonActivate handler is kept as a backstop.
 function attributeNearestPlayer(dimension, loc, type) {
     let nearest = null, best = Infinity;
     for (const p of dimension.getPlayers()) {
@@ -1059,6 +1067,78 @@ function isPistonDupeContainer(typeId) {
     if (typeId.endsWith("shulker_box")) return true;
     return typeId === "minecraft:chest" || typeId === "minecraft:trapped_chest" || typeId === "minecraft:barrel";
 }
+
+function isPistonType(typeId) {
+    return typeId === "minecraft:piston" || typeId === "minecraft:sticky_piston";
+}
+
+// facing_direction state -> the offset the piston pushes toward.
+const PISTON_FACING_OFFSETS = {
+    0: { x: 0, y: -1, z: 0 }, 1: { x: 0, y: 1, z: 0 },
+    2: { x: 0, y: 0, z: -1 }, 3: { x: 0, y: 0, z: 1 },
+    4: { x: -1, y: 0, z: 0 }, 5: { x: 1, y: 0, z: 0 },
+};
+
+function pistonFacingOffset(pistonBlock) {
+    try {
+        const f = pistonBlock.permutation.getState("facing_direction");
+        return PISTON_FACING_OFFSETS[f] ?? null;
+    } catch (e) { return null; }
+}
+
+// Pop a piston that is set up to push a container, returning it as an item.
+function neutralizePistonSetup(pistonBlock, containerName, player) {
+    try {
+        const dimension = pistonBlock.dimension;
+        const loc = { x: pistonBlock.location.x, y: pistonBlock.location.y, z: pistonBlock.location.z };
+        const pistonType = pistonBlock.typeId;
+        dimension.setBlockType(loc, "minecraft:air");
+        try { dimension.spawnItem(new ItemStack(pistonType, 1), { x: loc.x + 0.5, y: loc.y + 0.5, z: loc.z + 0.5 }); } catch (e) {}
+        broadcastAlert(`§fA §cpiston ${containerName} dupe§f was blocked at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+        if (player) {
+            recordDupeAttempt(player);
+            recordDupeHistory(player.name, `Piston Dupe: ${containerName}`, player.dimension.id);
+            try { player.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
+        } else {
+            attributeNearestPlayer(dimension, loc, `Piston Dupe: ${containerName}`);
+        }
+    } catch (e) {}
+}
+
+// Primary detector: catch the setup the moment it is built, attributed to the
+// player who placed the piston or the container.
+world.afterEvents.playerPlaceBlock.subscribe((event) => {
+    if (!getPistonProtectionSetting()) return;
+    try {
+        const player = event.player;
+        const block = event.block;
+        const dimension = block.dimension;
+        if (isPistonType(block.typeId)) {
+            // Placed a piston aimed at a container?
+            const off = pistonFacingOffset(block);
+            if (!off) return;
+            const front = dimension.getBlock({ x: block.location.x + off.x, y: block.location.y + off.y, z: block.location.z + off.z });
+            if (front && isPistonDupeContainer(front.typeId)) {
+                const name = front.typeId.replace("minecraft:", "");
+                system.run(() => neutralizePistonSetup(block, name, player));
+            }
+        } else if (isPistonDupeContainer(block.typeId)) {
+            // Placed a container in front of a piston already aimed at it?
+            for (const key in PISTON_FACING_OFFSETS) {
+                const o = PISTON_FACING_OFFSETS[key];
+                const nb = dimension.getBlock({ x: block.location.x - o.x, y: block.location.y - o.y, z: block.location.z - o.z });
+                if (nb && isPistonType(nb.typeId)) {
+                    const nbOff = pistonFacingOffset(nb);
+                    if (nbOff && nbOff.x === o.x && nbOff.y === o.y && nbOff.z === o.z) {
+                        const name = block.typeId.replace("minecraft:", "");
+                        system.run(() => neutralizePistonSetup(nb, name, player));
+                        break;
+                    }
+                }
+            }
+        }
+    } catch (e) {}
+});
 
 world.afterEvents.pistonActivate.subscribe((event) => {
     if (!getPistonProtectionSetting()) return;
