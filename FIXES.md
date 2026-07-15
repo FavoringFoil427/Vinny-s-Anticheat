@@ -30,6 +30,12 @@ a push Bedrock swaps the moving block to `minecraft:moving_block`, so
 `pistonActivate.getAttachedBlocks()` can't read the real type — that approach was
 removed as unreliable.
 
+Facing is read from the piston's block state, trying both the legacy integer
+`facing_direction` and the newer string `minecraft:facing_direction`. If a
+version won't expose either, the sweep falls back to popping a piston with a
+container directly adjacent, so protection never silently stops working. Both
+`minecraft:piston` and `minecraft:sticky_piston` are handled identically.
+
 Deliberately conservative: we only ever remove the **piston**, never the
 container or its contents — so a false positive costs at most one piston, never
 any items. Chests/barrels only trip the check when actually in a piston's push

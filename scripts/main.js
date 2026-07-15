@@ -1068,17 +1068,30 @@ function isImmovableForPiston(typeId) {
         isPistonType(typeId);
 }
 
-// facing_direction state -> the offset the piston pushes toward.
+// facing_direction (legacy integer) -> the offset the piston pushes toward.
 const PISTON_FACING_OFFSETS = {
     0: { x: 0, y: -1, z: 0 }, 1: { x: 0, y: 1, z: 0 },
     2: { x: 0, y: 0, z: -1 }, 3: { x: 0, y: 0, z: 1 },
     4: { x: -1, y: 0, z: 0 }, 5: { x: 1, y: 0, z: 0 },
 };
+// minecraft:facing_direction (newer string trait) -> same offsets.
+const FACING_STRING_OFFSETS = {
+    down: { x: 0, y: -1, z: 0 }, up: { x: 0, y: 1, z: 0 },
+    north: { x: 0, y: 0, z: -1 }, south: { x: 0, y: 0, z: 1 },
+    west: { x: -1, y: 0, z: 0 }, east: { x: 1, y: 0, z: 0 },
+};
 
+// Read a piston's push direction. Different versions/blocks expose it as either
+// the legacy integer `facing_direction` or the string `minecraft:facing_direction`,
+// so try both before giving up.
 function pistonFacingOffset(pistonBlock) {
     try {
-        const f = pistonBlock.permutation.getState("facing_direction");
-        return PISTON_FACING_OFFSETS[f] ?? null;
+        const perm = pistonBlock.permutation;
+        const f = perm.getState("facing_direction");
+        if (f !== undefined && f !== null && PISTON_FACING_OFFSETS[f]) return PISTON_FACING_OFFSETS[f];
+        const s = perm.getState("minecraft:facing_direction");
+        if (typeof s === "string" && FACING_STRING_OFFSETS[s]) return FACING_STRING_OFFSETS[s];
+        return null;
     } catch (e) { return null; }
 }
 
@@ -1109,16 +1122,27 @@ function neutralizePistonSetup(pistonBlock, containerName, player) {
 // merely next to a container on a non-facing side is left alone.
 function checkPistonSetup(pistonBlock, dimension) {
     try {
-        const off = pistonFacingOffset(pistonBlock);
-        if (!off) return;
         const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
-        // Trace the contiguous push line (pistons move up to 12 blocks).
-        for (let i = 1; i <= 12; i++) {
-            const b = dimension.getBlock({ x: px + off.x * i, y: py + off.y * i, z: pz + off.z * i });
-            if (!b) return;
-            const t = b.typeId;
-            if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
-            if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
+        const off = pistonFacingOffset(pistonBlock);
+        if (off) {
+            // Directional: trace the contiguous push line (pistons move up to 12
+            // blocks) and pop the piston if it would push a container.
+            for (let i = 1; i <= 12; i++) {
+                const b = dimension.getBlock({ x: px + off.x * i, y: py + off.y * i, z: pz + off.z * i });
+                if (!b) return;
+                const t = b.typeId;
+                if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+                if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
+            }
+            return;
+        }
+        // Safety net: only if this version won't expose the piston's facing at all,
+        // fall back to popping when a container is directly adjacent, so protection
+        // never silently does nothing.
+        const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+        for (const [dx, dy, dz] of dirs) {
+            const b = dimension.getBlock({ x: px + dx, y: py + dy, z: pz + dz });
+            if (b && isPistonDupeContainer(b.typeId)) { neutralizePistonSetup(pistonBlock, b.typeId.replace("minecraft:", ""), null); return; }
         }
     } catch (e) {}
 }
