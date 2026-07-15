@@ -782,14 +782,15 @@ function handleIllegalContainer(container, player) {
 function scanNearbyContainers() {
     const bundleOn = getBundleBlockingSetting();
     const illegalOn = getIllegalItemsSetting();
-    if (!bundleOn && !illegalOn) return;
+    const pistonOn = getPistonProtectionSetting();
+    if (!bundleOn && !illegalOn && !pistonOn) return;
 
     for (const player of world.getPlayers()) {
         try {
             const isAdmin = player.hasTag("admin");
-            // Admins bypass illegal-item sweeping; bundle blocking applies to everyone.
+            // Admins bypass illegal-item sweeping; bundle/piston protection applies to everyone.
             const scanIllegal = illegalOn && !isAdmin;
-            if (!bundleOn && !scanIllegal) continue;
+            if (!bundleOn && !scanIllegal && !pistonOn) continue;
 
             const pos = player.location;
             const dimension = player.dimension;
@@ -801,6 +802,7 @@ function scanNearbyContainers() {
                             const block = dimension.getBlock({ x: baseX + dx, y: baseY + dy, z: baseZ + dz });
                             if (!block) continue;
                             const typeId = block.typeId;
+                            if (pistonOn && isPistonType(typeId)) { checkPistonSetup(block, dimension); continue; }
                             const doBundle = bundleOn && isBundleScanContainer(typeId);
                             const doIllegal = scanIllegal && isIllegalScanContainer(typeId);
                             if (!doBundle && !doIllegal) continue;
@@ -1041,27 +1043,14 @@ world.afterEvents.entityRemove.subscribe((event) => {
 // PISTON off (returned as an item so no block is lost) — never the container or
 // its contents, so a false positive costs at most one piston.
 //
-// Detection is primarily at PLACEMENT time (playerPlaceBlock): when a piston is
-// aimed at a container, or a container is placed in front of an aimed piston, we
-// remove the piston and attribute it to the placing player. This is reliable and
-// correctly attributed, unlike reading pistonActivate's attached blocks (during
-// a push Bedrock swaps the moving block to "minecraft:moving_block", so the real
-// type can't be read there). The pistonActivate handler is kept as a backstop.
-function attributeNearestPlayer(dimension, loc, type) {
-    let nearest = null, best = Infinity;
-    for (const p of dimension.getPlayers()) {
-        if (p.hasTag("admin")) continue;
-        const dx = p.location.x - loc.x, dy = p.location.y - loc.y, dz = p.location.z - loc.z;
-        const d = dx * dx + dy * dy + dz * dz;
-        if (d < best) { best = d; nearest = p; }
-    }
-    if (nearest && best <= 64 * 64) {
-        recordDupeAttempt(nearest);
-        recordDupeHistory(nearest.name, type, nearest.dimension.id);
-    }
-}
-
-// Container block-entities that duplicate when moved by a piston.
+// The glitch has many geometric variants: the container directly in front, a
+// block (e.g. a lightning rod) pushed INTO the container, or the container
+// offset a block from the piston/pushed block. So rather than match one shape,
+// we (1) catch the obvious "piston aimed straight at a container" at placement
+// time with correct attribution, and (2) continuously sweep every piston near a
+// player, tracing its full push line and checking for adjacent shulkers, and pop
+// any piston that could move a container. The sweep can't reliably attribute to
+// a builder, so it only removes + alerts; the placement path is what escalates.
 function isPistonDupeContainer(typeId) {
     if (!typeId) return false;
     if (typeId.endsWith("shulker_box")) return true;
@@ -1070,6 +1059,13 @@ function isPistonDupeContainer(typeId) {
 
 function isPistonType(typeId) {
     return typeId === "minecraft:piston" || typeId === "minecraft:sticky_piston";
+}
+
+// Blocks a piston physically cannot push past — stop tracing the push line here.
+function isImmovableForPiston(typeId) {
+    return typeId === "minecraft:air" || typeId === "minecraft:obsidian" ||
+        typeId === "minecraft:bedrock" || typeId === "minecraft:barrier" ||
+        isPistonType(typeId);
 }
 
 // facing_direction state -> the offset the piston pushes toward.
@@ -1086,7 +1082,21 @@ function pistonFacingOffset(pistonBlock) {
     } catch (e) { return null; }
 }
 
+// True if any of the 6 blocks touching (x,y,z) is a shulker box.
+function hasAdjacentShulker(dimension, x, y, z) {
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    for (const [dx, dy, dz] of dirs) {
+        try {
+            const b = dimension.getBlock({ x: x + dx, y: y + dy, z: z + dz });
+            if (b && b.typeId.endsWith("shulker_box")) return true;
+        } catch (e) {}
+    }
+    return false;
+}
+
 // Pop a piston that is set up to push a container, returning it as an item.
+// A player is passed only when we can attribute it (placement); the sweep passes
+// null and only removes + alerts, to avoid escalating the wrong nearby player.
 function neutralizePistonSetup(pistonBlock, containerName, player) {
     try {
         const dimension = pistonBlock.dimension;
@@ -1098,15 +1108,39 @@ function neutralizePistonSetup(pistonBlock, containerName, player) {
         if (player) {
             recordDupeAttempt(player);
             recordDupeHistory(player.name, `Piston Dupe: ${containerName}`, player.dimension.id);
-            try { player.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
-        } else {
-            attributeNearestPlayer(dimension, loc, `Piston Dupe: ${containerName}`);
+        }
+        for (const p of dimension.getPlayers({ location: loc, maxDistance: 16 })) {
+            try { p.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
         }
     } catch (e) {}
 }
 
-// Primary detector: catch the setup the moment it is built, attributed to the
-// player who placed the piston or the container.
+// Sweep check (called for each piston found near a player): pop the piston if it
+// could move a container by any of the known geometries.
+function checkPistonSetup(pistonBlock, dimension) {
+    try {
+        const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
+        // A shulker directly touching the piston (adjacent / above / below).
+        if (hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+        const off = pistonFacingOffset(pistonBlock);
+        if (!off) return;
+        // Trace the contiguous push line (pistons move up to 12 blocks).
+        for (let i = 1; i <= 12; i++) {
+            const cx = px + off.x * i, cy = py + off.y * i, cz = pz + off.z * i;
+            const b = dimension.getBlock({ x: cx, y: cy, z: cz });
+            if (!b) return;
+            const t = b.typeId;
+            if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+            // A shulker sitting beside a block in the push line (e.g. on top of a
+            // pushed lightning rod) also dupes.
+            if (hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+            if (isImmovableForPiston(t)) return; // air/obsidian/etc. — line stops here
+        }
+    } catch (e) {}
+}
+
+// Placement detector: catch the obvious "piston aimed straight at a container"
+// setup the moment it is built, attributed to (and escalating) the placer.
 world.afterEvents.playerPlaceBlock.subscribe((event) => {
     if (!getPistonProtectionSetting()) return;
     try {
@@ -1114,7 +1148,6 @@ world.afterEvents.playerPlaceBlock.subscribe((event) => {
         const block = event.block;
         const dimension = block.dimension;
         if (isPistonType(block.typeId)) {
-            // Placed a piston aimed at a container?
             const off = pistonFacingOffset(block);
             if (!off) return;
             const front = dimension.getBlock({ x: block.location.x + off.x, y: block.location.y + off.y, z: block.location.z + off.z });
@@ -1123,7 +1156,6 @@ world.afterEvents.playerPlaceBlock.subscribe((event) => {
                 system.run(() => neutralizePistonSetup(block, name, player));
             }
         } else if (isPistonDupeContainer(block.typeId)) {
-            // Placed a container in front of a piston already aimed at it?
             for (const key in PISTON_FACING_OFFSETS) {
                 const o = PISTON_FACING_OFFSETS[key];
                 const nb = dimension.getBlock({ x: block.location.x - o.x, y: block.location.y - o.y, z: block.location.z - o.z });
@@ -1137,36 +1169,5 @@ world.afterEvents.playerPlaceBlock.subscribe((event) => {
                 }
             }
         }
-    } catch (e) {}
-});
-
-world.afterEvents.pistonActivate.subscribe((event) => {
-    if (!getPistonProtectionSetting()) return;
-    try {
-        const piston = event.piston;
-        if (!piston) return;
-        const attached = piston.getAttachedBlocks ? piston.getAttachedBlocks() : [];
-        let movedContainer = null;
-        for (const b of attached) {
-            try { if (isPistonDupeContainer(b?.typeId)) { movedContainer = b.typeId; break; } } catch (e) {}
-        }
-        if (!movedContainer) return;
-        const pistonBlock = piston.block;
-        if (!pistonBlock) return;
-        const dimension = pistonBlock.dimension;
-        const loc = { x: pistonBlock.location.x, y: pistonBlock.location.y, z: pistonBlock.location.z };
-        const pistonType = pistonBlock.typeId; // minecraft:piston or minecraft:sticky_piston
-        const containerName = movedContainer.replace("minecraft:", "");
-        system.run(() => {
-            try {
-                dimension.setBlockType(loc, "minecraft:air");
-                try { dimension.spawnItem(new ItemStack(pistonType, 1), { x: loc.x + 0.5, y: loc.y + 0.5, z: loc.z + 0.5 }); } catch (e) {}
-            } catch (e) {}
-            broadcastAlert(`§fA §cpiston ${containerName} dupe§f was blocked at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
-            attributeNearestPlayer(dimension, loc, `Piston Dupe: ${containerName}`);
-            for (const p of dimension.getPlayers({ location: loc, maxDistance: 16 })) {
-                p.playSound("note.bass", { pitch: 0.5, volume: 1 });
-            }
-        });
     } catch (e) {}
 });

@@ -9,22 +9,34 @@ it — a known Bedrock 1.21 glitch). Covered block-entities: **all shulker boxes
 chests, trapped chests, and barrels**. The pack's existing shulker blocking only
 scanned hoppers/dispensers/droppers/crafters, so this path was uncovered.
 
-Detection is primarily at **placement time** (`playerPlaceBlock`): the moment a
-piston is aimed at a container — or a container is placed in front of an already-
-aimed piston — the pack removes the **piston** (dropping it back as an item) and
-attributes it to the placing player (`Piston Dupe: <container>`), feeding the
-escalation system.
+The glitch has **many geometric variants** — the container straight in front of
+the piston, a block (e.g. a lightning rod) pushed *into* the container, or the
+container offset by a block from the piston or the pushed block. Matching one
+shape is not enough (each offset becomes a bypass), so detection is two-layered:
 
-Why placement and not the piston push: there is no cancellable piston event, and
-during a push Bedrock swaps the moving block to `minecraft:moving_block`, so
-`pistonActivate.getAttachedBlocks()` can't reliably read the real block type.
-The `pistonActivate` handler is kept as a backstop, but placement detection is
-the reliable, correctly-attributed path.
+1. **Placement (`playerPlaceBlock`)** — the obvious "piston aimed straight at a
+   container" is caught the instant it's built, attributed to the placer
+   (`Piston Dupe: <container>`) and fed into the escalation system.
+2. **Continuous sweep** — every piston near a player is checked each scan: we
+   trace its full **push line** (up to 12 blocks, so a lightning rod / any block
+   pushed into a container is caught) and check for **shulkers adjacent** to the
+   piston or to any block in that line (so offset/"one block above" setups are
+   caught). Any piston that could move a container is popped off. The sweep
+   can't reliably identify the builder, so it only removes + alerts; escalation
+   comes from the placement path.
+
+Why not the piston push itself: there is no cancellable piston event, and during
+a push Bedrock swaps the moving block to `minecraft:moving_block`, so
+`pistonActivate.getAttachedBlocks()` can't read the real type — that approach was
+removed as unreliable.
 
 Deliberately conservative: we only ever remove the **piston**, never the
-container or its contents — so a false positive (a legit build aiming a piston at
-a chest/barrel, which is uncommon) costs at most one piston, never any items.
-Toggle with `/cheats:piston` or in the panel (default on).
+container or its contents — so a false positive costs at most one piston, never
+any items. Chests/barrels only trip the check when actually in a piston's push
+line (not mere adjacency), so normal chest-next-to-piston redstone is unaffected;
+shulkers are treated more aggressively (adjacency counts), since a shulker next
+to a piston is almost never legitimate. Toggle with `/cheats:piston` or in the
+panel (default on).
 
 ## Admin-tag gate on the `/cheats:ui` panel (fixed)
 
