@@ -1,4 +1,4 @@
-import { world, system, CommandPermissionLevel, CustomCommandParamType } from "@minecraft/server";
+import { world, system, CommandPermissionLevel, CustomCommandParamType, ItemStack } from "@minecraft/server";
 import { ActionFormData, ModalFormData, MessageFormData, FormCancelationReason } from "@minecraft/server-ui";
 
 console.warn("[Vinny's Anticheat] Script loading...");
@@ -152,6 +152,7 @@ const ILLEGAL_ITEMS_PROPERTY = "cheats:illegalItems";
 const BANNED_BLOCKS_PROPERTY = "cheats:bannedBlocks";
 const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
 const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
+const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
 const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
 const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
@@ -169,6 +170,8 @@ function getBedrockProtectionSetting() { return world.getDynamicProperty(BEDROCK
 function setBedrockProtectionSetting(v) { world.setDynamicProperty(BEDROCK_PROTECTION_PROPERTY, v); }
 function getMinecartProtectionSetting() { return world.getDynamicProperty(MINECART_PROTECTION_PROPERTY) ?? true; }
 function setMinecartProtectionSetting(v) { world.setDynamicProperty(MINECART_PROTECTION_PROPERTY, v); }
+function getPistonProtectionSetting() { return world.getDynamicProperty(PISTON_PROTECTION_PROPERTY) ?? true; }
+function setPistonProtectionSetting(v) { world.setDynamicProperty(PISTON_PROTECTION_PROPERTY, v); }
 function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
 function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
@@ -223,6 +226,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bannedblocks §7- Toggle Banned Block Detection\n`;
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
+                msg += `  §f/cheats:piston §7- Toggle Piston Shulker Dupe Protection\n`;
                 msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
                 msg += `  §f/cheats:escalate [n] §7- Set auto-flag/kick threshold (0=off)\n`;
                 msg += `\n§aInfo:§r\n`;
@@ -257,6 +261,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Banned Block Detection: ${getBannedBlocksSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Piston Shulker Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}§r\n`
                 );
@@ -321,6 +326,16 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getMinecartProtectionSetting(); setMinecartProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Minecart Dupe Detection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:piston", description: "Toggle Piston Shulker Dupe Protection", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getPistonProtectionSetting(); setPistonProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Piston Shulker Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
             return { status: 0 };
         }
     );
@@ -534,6 +549,7 @@ async function openTogglesMenu(player) {
         .toggle("Banned Block Detection", { defaultValue: getBannedBlocksSetting() })
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
         .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() })
+        .toggle("Piston Shulker Dupe Protection", { defaultValue: getPistonProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
         .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
         .toggle("Kick at threshold (off = flag only)", { defaultValue: getEscalationKick() });
@@ -546,9 +562,10 @@ async function openTogglesMenu(player) {
     setBannedBlocksSetting(!!v[3]);
     setBedrockProtectionSetting(!!v[4]);
     setMinecartProtectionSetting(!!v[5]);
-    setAdminOnlyAlerts(!!v[6]);
-    setEscalationThreshold(Math.max(0, Math.floor(v[7] ?? 0)));
-    setEscalationKick(!!v[8]);
+    setPistonProtectionSetting(!!v[6]);
+    setAdminOnlyAlerts(!!v[7]);
+    setEscalationThreshold(Math.max(0, Math.floor(v[8] ?? 0)));
+    setEscalationKick(!!v[9]);
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
@@ -1013,4 +1030,55 @@ world.afterEvents.entityRemove.subscribe((event) => {
     }
     recentMinecartBreaks.set(key, now);
     system.runTimeout(() => recentMinecartBreaks.delete(key), 5000);
+});
+
+// --- PISTON SHULKER DUPE PROTECTION ---
+// Pushing shulker boxes with a piston is a known Bedrock duplication glitch.
+// There is no cancellable piston event, so we react to pistonActivate: the
+// instant a piston is moving a shulker box we pop the PISTON off (and return
+// it as an item so nobody loses a block) to break the contraption before it
+// can be cycled to farm dupes. We never touch the shulker box or its contents,
+// so a false positive costs at most one piston, never any items.
+function attributeNearestPlayer(dimension, loc, type) {
+    let nearest = null, best = Infinity;
+    for (const p of dimension.getPlayers()) {
+        if (p.hasTag("admin")) continue;
+        const dx = p.location.x - loc.x, dy = p.location.y - loc.y, dz = p.location.z - loc.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < best) { best = d; nearest = p; }
+    }
+    if (nearest && best <= 64 * 64) {
+        recordDupeAttempt(nearest);
+        recordDupeHistory(nearest.name, type, nearest.dimension.id);
+    }
+}
+
+world.afterEvents.pistonActivate.subscribe((event) => {
+    if (!getPistonProtectionSetting()) return;
+    try {
+        const piston = event.piston;
+        if (!piston) return;
+        const attached = piston.getAttachedBlocks ? piston.getAttachedBlocks() : [];
+        let movingShulker = false;
+        for (const b of attached) {
+            try { if (b?.typeId?.endsWith("shulker_box")) { movingShulker = true; break; } } catch (e) {}
+        }
+        if (!movingShulker) return;
+        const pistonBlock = piston.block;
+        if (!pistonBlock) return;
+        const dimension = pistonBlock.dimension;
+        const loc = { x: pistonBlock.location.x, y: pistonBlock.location.y, z: pistonBlock.location.z };
+        const pistonType = pistonBlock.typeId; // minecraft:piston or minecraft:sticky_piston
+        system.run(() => {
+            try {
+                dimension.setBlockType(loc, "minecraft:air");
+                try { dimension.spawnItem(new ItemStack(pistonType, 1), { x: loc.x + 0.5, y: loc.y + 0.5, z: loc.z + 0.5 }); } catch (e) {}
+            } catch (e) {}
+            broadcastAlert(`§fA §cpiston shulker-box dupe§f was blocked at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+            attributeNearestPlayer(dimension, loc, "Piston Shulker Dupe");
+            for (const p of dimension.getPlayers({ location: loc, maxDistance: 16 })) {
+                p.playSound("note.bass", { pitch: 0.5, volume: 1 });
+            }
+        });
+    } catch (e) {}
 });

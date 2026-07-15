@@ -2,6 +2,24 @@
 
 Review of `scripts/main.js` (behavior pack, `@minecraft/server` 2.4.0).
 
+## Piston shulker-box dupe protection (new)
+
+Covers the "piston shulker dupe" (a piston pushing shulker boxes duplicates
+them — a known Bedrock 1.21 glitch). The pack's existing shulker blocking only
+scanned hoppers/dispensers/droppers/crafters, so this path was uncovered.
+
+There is **no cancellable piston event** (`pistonActivate` is after-only), so we
+react to it: the instant a piston is moving a shulker box, we remove the
+**piston** (and drop it back as an item so no block is lost) to break the
+contraption before it can be cycled to farm dupes. The nearest non-admin player
+is logged (`Piston Shulker Dupe`) and fed into the escalation system, and an
+alert + sound fire.
+
+Deliberately conservative: we only ever remove the **piston**, never the shulker
+box or its contents — so a false positive (a legit build that pushes a shulker,
+which is rare) costs at most one piston, never any items. Toggle with
+`/cheats:piston` or in the panel (default on).
+
 ## Inventory Sync false positives on fast pickups (fixed)
 
 Players reported "tried to sync duplicated \<item\>" firing when they picked
