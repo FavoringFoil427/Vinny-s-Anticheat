@@ -2,10 +2,11 @@
 
 Review of `scripts/main.js` (behavior pack, `@minecraft/server` 2.4.0).
 
-## Piston shulker-box dupe protection (new)
+## Piston container dupe protection (new)
 
-Covers the "piston shulker dupe" (a piston pushing shulker boxes duplicates
-them — a known Bedrock 1.21 glitch). The pack's existing shulker blocking only
+Covers the "piston dupe" (a piston pushing a container block-entity duplicates
+it — a known Bedrock 1.21 glitch). Covered block-entities: **all shulker boxes,
+chests, trapped chests, and barrels**. The pack's existing shulker blocking only
 scanned hoppers/dispensers/droppers/crafters, so this path was uncovered.
 
 There is **no cancellable piston event** (`pistonActivate` is after-only), so we
