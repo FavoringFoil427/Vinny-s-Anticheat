@@ -45,6 +45,19 @@ shulkers are treated more aggressively (adjacency counts), since a shulker next
 to a piston is almost never legitimate. Toggle with `/cheats:piston` or in the
 panel (default on).
 
+### Duped-item cleanup (geometry-independent safety net)
+
+Because piston-facing can't be read reliably on every version, a second layer
+catches the dupe by its *result* instead of its setup: when a piston dupe fires
+it drops the extra container as an item entity. On `entitySpawn`, if two or more
+of the **same** container item appear at the same block position **next to a
+piston** within ~1 second, the extras are deleted (one is kept). It's scoped to
+piston-adjacent drops, so ordinary shulker drops from breaking/dropping are never
+touched, and it only removes the surplus copies — the player keeps the original.
+This is what actually "gets rid of the duped shulker" regardless of the setup
+geometry. (It catches dupes that drop items; a variant that duplicates a placed
+block instead would need separate handling.)
+
 ## Admin-tag gate on the `/cheats:ui` panel (fixed)
 
 `/cheats:ui` was open to any **operator**, so an opped player without the `admin`

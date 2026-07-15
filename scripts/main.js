@@ -1184,3 +1184,52 @@ world.afterEvents.playerPlaceBlock.subscribe((event) => {
         }
     } catch (e) {}
 });
+
+// --- DUPED-CONTAINER-ITEM CLEANUP ---
+// Geometry-independent safety net: when a piston dupe fires it drops the extra
+// container as an item entity. If two or more of the SAME container item appear
+// at the same spot next to a piston within ~1s, the extras are the duped copies
+// — delete them (keeping one). Scoped to piston-adjacent drops so ordinary
+// shulker drops from breaking/dropping are never touched.
+const recentContainerDrops = new Map(); // "x,y,z" -> count within the window
+
+function pistonWithin(dimension, loc, radius) {
+    const bx = Math.floor(loc.x), by = Math.floor(loc.y), bz = Math.floor(loc.z);
+    for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            for (let dz = -radius; dz <= radius; dz++) {
+                try {
+                    const b = dimension.getBlock({ x: bx + dx, y: by + dy, z: bz + dz });
+                    if (b && isPistonType(b.typeId)) return true;
+                } catch (e) {}
+            }
+        }
+    }
+    return false;
+}
+
+world.afterEvents.entitySpawn.subscribe((event) => {
+    if (!getPistonProtectionSetting()) return;
+    try {
+        const ent = event.entity;
+        if (!ent || ent.typeId !== "minecraft:item") return;
+        const stack = ent.getComponent("minecraft:item")?.itemStack;
+        if (!stack || !isPistonDupeContainer(stack.typeId)) return;
+        const dimension = ent.dimension;
+        const loc = ent.location;
+        if (!pistonWithin(dimension, loc, 3)) return; // only near a piston
+        const key = `${Math.floor(loc.x)},${Math.floor(loc.y)},${Math.floor(loc.z)}`;
+        const count = (recentContainerDrops.get(key) || 0) + 1;
+        recentContainerDrops.set(key, count);
+        if (count === 1) {
+            // First copy is the legitimate one; keep it, and start the window.
+            system.runTimeout(() => recentContainerDrops.delete(key), 20);
+            return;
+        }
+        // Second+ identical container item at this spot near a piston = duped.
+        system.run(() => {
+            try { ent.remove(); } catch (e) {}
+            broadcastAlert(`§fA §cpiston ${stack.typeId.replace("minecraft:", "")} dupe§f was cleaned up at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+        });
+    } catch (e) {}
+});
