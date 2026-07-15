@@ -1082,18 +1082,6 @@ function pistonFacingOffset(pistonBlock) {
     } catch (e) { return null; }
 }
 
-// True if any of the 6 blocks touching (x,y,z) is a shulker box.
-function hasAdjacentShulker(dimension, x, y, z) {
-    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-    for (const [dx, dy, dz] of dirs) {
-        try {
-            const b = dimension.getBlock({ x: x + dx, y: y + dy, z: z + dz });
-            if (b && b.typeId.endsWith("shulker_box")) return true;
-        } catch (e) {}
-    }
-    return false;
-}
-
 // Pop a piston that is set up to push a container, returning it as an item.
 // A player is passed only when we can attribute it (placement); the sweep passes
 // null and only removes + alerts, to avoid escalating the wrong nearby player.
@@ -1115,26 +1103,22 @@ function neutralizePistonSetup(pistonBlock, containerName, player) {
     } catch (e) {}
 }
 
-// Sweep check (called for each piston found near a player): pop the piston if it
-// could move a container by any of the known geometries.
+// Sweep check (called for each piston found near a player): pop the piston only
+// if it actually FACES a container it could push — either directly in front, or
+// through a run of pushed blocks (e.g. a lightning rod between them). A piston
+// merely next to a container on a non-facing side is left alone.
 function checkPistonSetup(pistonBlock, dimension) {
     try {
-        const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
-        // A shulker directly touching the piston (adjacent / above / below).
-        if (hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
         const off = pistonFacingOffset(pistonBlock);
         if (!off) return;
+        const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
         // Trace the contiguous push line (pistons move up to 12 blocks).
         for (let i = 1; i <= 12; i++) {
-            const cx = px + off.x * i, cy = py + off.y * i, cz = pz + off.z * i;
-            const b = dimension.getBlock({ x: cx, y: cy, z: cz });
+            const b = dimension.getBlock({ x: px + off.x * i, y: py + off.y * i, z: pz + off.z * i });
             if (!b) return;
             const t = b.typeId;
             if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
-            // A shulker sitting beside a block in the push line (e.g. on top of a
-            // pushed lightning rod) also dupes.
-            if (hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
-            if (isImmovableForPiston(t)) return; // air/obsidian/etc. — line stops here
+            if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
         }
     } catch (e) {}
 }
