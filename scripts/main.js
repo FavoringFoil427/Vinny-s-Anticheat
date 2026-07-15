@@ -1116,33 +1116,38 @@ function neutralizePistonSetup(pistonBlock, containerName, player) {
     } catch (e) {}
 }
 
-// Sweep check (called for each piston found near a player): pop the piston only
-// if it actually FACES a container it could push — either directly in front, or
-// through a run of pushed blocks (e.g. a lightning rod between them). A piston
-// merely next to a container on a non-facing side is left alone.
+// True if any of the 6 blocks touching (x,y,z) is a shulker box.
+function hasAdjacentShulker(dimension, x, y, z) {
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    for (const [dx, dy, dz] of dirs) {
+        try {
+            const b = dimension.getBlock({ x: x + dx, y: y + dy, z: z + dz });
+            if (b && b.typeId.endsWith("shulker_box")) return true;
+        } catch (e) {}
+    }
+    return false;
+}
+
+// Sweep check (called for each piston found near a player). Reading the piston's
+// facing proved unreliable across versions, so we use position, not direction: a
+// shulker touching the piston on ANY side pops it (a shulker next to a piston is
+// virtually never a legit build). We still trace the push line as a bonus so a
+// container behind a pushed block (e.g. a lightning rod), or a chest/barrel in
+// the push path, is caught too.
 function checkPistonSetup(pistonBlock, dimension) {
     try {
         const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
+        if (hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
         const off = pistonFacingOffset(pistonBlock);
-        if (off) {
-            // Directional: trace the contiguous push line (pistons move up to 12
-            // blocks) and pop the piston if it would push a container.
-            for (let i = 1; i <= 12; i++) {
-                const b = dimension.getBlock({ x: px + off.x * i, y: py + off.y * i, z: pz + off.z * i });
-                if (!b) return;
-                const t = b.typeId;
-                if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
-                if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
-            }
-            return;
-        }
-        // Safety net: only if this version won't expose the piston's facing at all,
-        // fall back to popping when a container is directly adjacent, so protection
-        // never silently does nothing.
-        const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-        for (const [dx, dy, dz] of dirs) {
-            const b = dimension.getBlock({ x: px + dx, y: py + dy, z: pz + dz });
-            if (b && isPistonDupeContainer(b.typeId)) { neutralizePistonSetup(pistonBlock, b.typeId.replace("minecraft:", ""), null); return; }
+        if (!off) return; // push-line bonus needs facing; adjacency above already ran
+        for (let i = 1; i <= 12; i++) {
+            const cx = px + off.x * i, cy = py + off.y * i, cz = pz + off.z * i;
+            const b = dimension.getBlock({ x: cx, y: cy, z: cz });
+            if (!b) return;
+            const t = b.typeId;
+            if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+            if (hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+            if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
         }
     } catch (e) {}
 }

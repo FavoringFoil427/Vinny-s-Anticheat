@@ -17,13 +17,14 @@ shape is not enough (each offset becomes a bypass), so detection is two-layered:
 1. **Placement (`playerPlaceBlock`)** — the obvious "piston aimed straight at a
    container" is caught the instant it's built, attributed to the placer
    (`Piston Dupe: <container>`) and fed into the escalation system.
-2. **Continuous sweep** — every piston near a player is checked each scan: we
-   trace its **push line** (up to 12 blocks, so a lightning rod / any block
-   pushed into a container is caught) and pop the piston only if it actually
-   **faces** a container it could push. A piston merely sitting next to a
-   container on a non-facing side is left alone, so ordinary builds aren't
-   disturbed. The sweep can't reliably identify the builder, so it only removes +
-   alerts; escalation comes from the placement path.
+2. **Continuous sweep** — every piston near a player is checked each scan. Reading
+   the piston's facing turned out to be unreliable across versions, so the sweep
+   uses **position, not direction**: a shulker touching the piston on any side
+   pops it (a shulker next to a piston is virtually never a legit build). It also
+   traces the push line as a bonus, so a container behind a pushed block (e.g. a
+   lightning rod) or a chest/barrel in the push path is caught. The sweep can't
+   reliably identify the builder, so it only removes + alerts; escalation comes
+   from the placement path.
 
 Why not the piston push itself: there is no cancellable piston event, and during
 a push Bedrock swaps the moving block to `minecraft:moving_block`, so
