@@ -157,6 +157,8 @@ const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
 const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
 const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
+const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction"; // 0 = flag, 1 = kick, 2 = ban
+const BANNED_PLAYERS_PROPERTY = "cheats:bannedPlayers";
 const FLAGGED_TAG = "cheats:flagged";
 
 function getBundleBlockingSetting() { return world.getDynamicProperty(BUNDLE_BLOCK_PROPERTY) ?? true; }
@@ -179,28 +181,64 @@ function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERT
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
 function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
 function setEscalationThreshold(v) { world.setDynamicProperty(ESCALATION_THRESHOLD_PROPERTY, v); }
-function getEscalationKick() { return world.getDynamicProperty(ESCALATION_KICK_PROPERTY) ?? false; }
-function setEscalationKick(v) { world.setDynamicProperty(ESCALATION_KICK_PROPERTY, v); }
+// Escalation action: 0 = flag only, 1 = kick, 2 = ban. Migrates from the old
+// boolean kick setting if the new one was never set.
+function getEscalationAction() {
+    const v = world.getDynamicProperty(ESCALATION_ACTION_PROPERTY);
+    if (typeof v === "number") return v;
+    return (world.getDynamicProperty(ESCALATION_KICK_PROPERTY) ?? false) ? 1 : 0;
+}
+function setEscalationAction(v) { world.setDynamicProperty(ESCALATION_ACTION_PROPERTY, v); }
+function escalationActionLabel(a) { return a === 2 ? "ban" : a === 1 ? "kick" : "flag"; }
+
+// --- BAN LIST (Bedrock has no native /ban, so we keep our own and kick on join) ---
+function getBanList() {
+    try { const raw = world.getDynamicProperty(BANNED_PLAYERS_PROPERTY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+}
+function saveBanList(list) {
+    try { world.setDynamicProperty(BANNED_PLAYERS_PROPERTY, JSON.stringify(list)); } catch (e) {}
+}
+function isBanned(name) { return getBanList().includes(name); }
+function addBan(name) { const l = getBanList(); if (!l.includes(name)) { l.push(name); saveBanList(l); } }
+function removeBan(name) { const l = getBanList(); const i = l.indexOf(name); if (i !== -1) { l.splice(i, 1); saveBanList(l); return true; } return false; }
+
+function kickPlayer(player, reason) {
+    const cmd = `kick "${player.name}" ${reason}`;
+    try { player.dimension.runCommand(cmd); }
+    catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
+}
 
 // Called after an attempt count is incremented. Once a player crosses the
-// configured threshold they are flagged (tag) and admins are notified once;
-// if kick-on-threshold is enabled the player is also kicked. The flag tag
-// prevents this from re-firing every subsequent attempt until the log is
-// cleared for that player.
+// configured threshold they are flagged (tag) and admins are notified once,
+// and depending on the action they are also kicked or banned. The flag tag
+// prevents this re-firing every later attempt until their log is cleared.
 function checkEscalation(player, newCount) {
-    if (player.hasTag("admin")) return; // never auto-flag/kick admins (e.g. while testing)
+    if (player.hasTag("admin")) return; // never auto-punish admins (e.g. while testing)
     const threshold = getEscalationThreshold();
     if (threshold <= 0 || newCount < threshold) return;
     if (player.hasTag(FLAGGED_TAG)) return;
     try { player.addTag(FLAGGED_TAG); } catch (e) {}
-    const kick = getEscalationKick();
-    notifyAdmins(`§e${player.name}§f reached §c${newCount}§f attempts — ${kick ? "§ckicking" : "§eflagged"}§f.`);
-    if (kick) {
-        const cmd = `kick "${player.name}" Anticheat: repeated dupe/exploit attempts`;
-        try { player.dimension.runCommand(cmd); }
-        catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
+    const action = getEscalationAction();
+    const verb = action === 2 ? "§cbanning" : action === 1 ? "§ckicking" : "§eflagged";
+    notifyAdmins(`§e${player.name}§f reached §c${newCount}§f attempts — ${verb}§f.`);
+    if (action === 2) {
+        addBan(player.name);
+        kickPlayer(player, "Anticheat: banned for repeated dupe/exploit attempts");
+    } else if (action === 1) {
+        kickPlayer(player, "Anticheat: repeated dupe/exploit attempts");
     }
 }
+
+// Enforce bans: a banned player is kicked as soon as they finish joining.
+world.afterEvents.playerSpawn.subscribe((event) => {
+    if (!event.initialSpawn) return;
+    const player = event.player;
+    if (player.hasTag("admin")) return; // safety: never lock an admin out
+    if (isBanned(player.name)) {
+        system.runTimeout(() => { try { kickPlayer(player, "Anticheat: you are banned from this world"); } catch (e) {} }, 20);
+    }
+});
 
 // Remove the escalation flag from a player (by name) if they are online, so
 // clearing their log gives them a clean slate.
@@ -243,6 +281,9 @@ system.beforeEvents.startup.subscribe((init) => {
                     msg += `  §f/cheats:viewlog §7- View the dupe log\n`;
                     msg += `  §f/cheats:history <player> §7- View a player's history\n`;
                     msg += `  §f/cheats:clearlog [player] §7- Clear the dupe log\n`;
+                    msg += `  §f/cheats:banlist §7- View banned players\n`;
+                    msg += `  §f/cheats:ban <player> §7- Ban a player\n`;
+                    msg += `  §f/cheats:unban <player> §7- Unban a player\n`;
                     msg += `  §f/cheats:whitelist <add/remove/list> [item] §7- Manage whitelist\n`;
                     msg += `  §f/cheats:whitelisthand §7- Whitelist item in hand\n`;
                 }
@@ -269,7 +310,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}§r\n`
+                    `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}§r\n`
                 );
             });
             return { status: 0 };
@@ -375,7 +416,7 @@ system.beforeEvents.startup.subscribe((init) => {
             system.run(() => {
                 if (threshold === undefined || threshold === null) {
                     const t = getEscalationThreshold();
-                    player.sendMessage(`§e[Anticheat]§r Auto-escalation: ${t > 0 ? `§aAt ${t} attempts (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}`);
+                    player.sendMessage(`§e[Anticheat]§r Auto-escalation: ${t > 0 ? `§aAt ${t} attempts (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}`);
                     return;
                 }
                 const t = Math.max(0, Math.floor(threshold));
@@ -443,6 +484,62 @@ system.beforeEvents.startup.subscribe((init) => {
                     clearDupeHistoryAll();
                     player.sendMessage(`§e[Anticheat]§r Dupe log §acleared§r.`);
                 }
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:banlist", description: "View banned players (requires admin tag)", permissionLevel: CommandPermissionLevel.Any },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const list = getBanList();
+                if (list.length === 0) { player.sendMessage(`§e[Anticheat]§r No players are banned.`); return; }
+                let msg = `§e[Anticheat] §lBanned Players§r §7(${list.length})§r\n`;
+                for (const n of list) msg += `  §c${n}\n`;
+                msg += `\n§7Use /cheats:unban <name> to lift a ban.`;
+                player.sendMessage(msg);
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:ban", description: "Ban a player (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                if (!name) { player.sendMessage(`§e[Anticheat]§c Please specify a player name.`); return; }
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (target && target.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c You cannot ban an admin.`); return; }
+                addBan(name);
+                if (target) kickPlayer(target, "Anticheat: you are banned from this world");
+                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned§r${target ? " and kicked" : " (will be kicked on join)"}.`);
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:unban", description: "Unban a player (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                if (!name) { player.sendMessage(`§e[Anticheat]§c Please specify a player name.`); return; }
+                if (removeBan(name)) player.sendMessage(`§e[Anticheat]§r §a${name}§r has been §aunbanned§r.`);
+                else player.sendMessage(`§e[Anticheat]§r §c${name}§r is not banned.`);
             });
             return { status: 0 };
         }
@@ -551,6 +648,7 @@ async function openMainMenu(player) {
         form.button("Player History");  actions.push(openHistoryPrompt);
         form.button("Clear Log");       actions.push(openClearLogMenu);
         form.button("Whitelist");       actions.push(openWhitelistMenu);
+        form.button("Bans");            actions.push(openBansMenu);
     }
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
@@ -571,7 +669,7 @@ async function openTogglesMenu(player) {
         .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
         .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
-        .toggle("Kick at threshold (off = flag only)", { defaultValue: getEscalationKick() });
+        .dropdown("Action at threshold", ["Flag only", "Kick", "Ban"], { defaultValueIndex: getEscalationAction() });
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
     const v = res.formValues;
@@ -585,7 +683,7 @@ async function openTogglesMenu(player) {
     setPortalProtectionSetting(!!v[7]);
     setAdminOnlyAlerts(!!v[8]);
     setEscalationThreshold(Math.max(0, Math.floor(v[9] ?? 0)));
-    setEscalationKick(!!v[10]);
+    setEscalationAction(Math.max(0, Math.min(2, v[10] ?? 0)));
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
@@ -719,6 +817,49 @@ async function openWhitelistMenu(player) {
                 const l = getItemWhitelist();
                 const i = l.indexOf(target);
                 if (i !== -1) { l.splice(i, 1); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §c${target}§r removed.`); }
+            }
+            break;
+        }
+        default:
+            await openMainMenu(player);
+    }
+}
+
+async function openBansMenu(player) {
+    const list = getBanList();
+    const form = new ActionFormData()
+        .title("Banned Players")
+        .body(list.length ? `${list.length} player(s) banned.` : "No players are banned.")
+        .button("View / Unban")
+        .button("Ban a Player")
+        .button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    switch (res.selection) {
+        case 0: {
+            if (list.length === 0) { player.sendMessage("§e[Anticheat]§r No players are banned."); break; }
+            const modal = new ModalFormData()
+                .title("Unban Player")
+                .dropdown("Select player to unban", list, { defaultValueIndex: 0 });
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const name = list[m.formValues[0]];
+                if (name && removeBan(name)) player.sendMessage(`§e[Anticheat]§r §a${name}§r has been §aunbanned§r.`);
+            }
+            break;
+        }
+        case 1: {
+            const modal = new ModalFormData().title("Ban a Player").textField("Player name", "Exact name");
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const name = (m.formValues[0] || "").trim();
+                if (!name) { player.sendMessage("§e[Anticheat]§c No name entered."); break; }
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (target && target.hasTag("admin")) { player.sendMessage("§e[Anticheat]§c You cannot ban an admin."); break; }
+                addBan(name);
+                if (target) kickPlayer(target, "Anticheat: you are banned from this world");
+                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             }
             break;
         }
