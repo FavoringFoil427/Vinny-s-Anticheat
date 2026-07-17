@@ -123,6 +123,20 @@ look like a surplus "dupe" and be removed. Guards added:
   false positives. It also bails if the inventory component isn't available yet.
 - `runSpawnCheck` skips entirely when the saved baseline is empty/untrusted.
 
+## Ban tier for auto-escalation (new)
+
+The escalation action is now three tiers instead of a kick on/off toggle:
+**Flag only / Kick / Ban** (chosen via the "Action at threshold" dropdown in the
+panel, shown in `/cheats:status`). Bedrock has no native `/ban`, so a ban adds
+the player to a persistent ban list (`cheats:bannedPlayers`) and kicks them; on
+every future join a banned player is kicked as they spawn. Admins are never
+auto-banned/kicked, and are also protected from manual bans.
+
+Ban management (admin tag): `/cheats:banlist`, `/cheats:ban <player>`,
+`/cheats:unban <player>`, plus a **Bans** screen in `/cheats:ui` (view + unban
+via dropdown, or ban by name). The old boolean kick setting is migrated
+automatically (kick-on → Kick tier).
+
 ## Admin-only alerts & auto-escalation (new)
 
 **Admin-only alerts.** `broadcastAlert` no longer always uses `world.sendMessage`.
