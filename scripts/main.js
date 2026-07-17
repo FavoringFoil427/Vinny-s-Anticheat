@@ -9,6 +9,18 @@ const DUPE_HISTORY_PROPERTY = "cheats:dupeHistory";
 const MAX_HISTORY_PER_PLAYER = 5;
 const ITEM_WHITELIST_PROPERTY = "cheats:itemWhitelist";
 const LAST_OFFENSE_PROPERTY = "cheats:lastOffense";
+const ESCALATION_COUNT_PROPERTY = "cheats:escalationCounts";
+
+// Escalation uses its own per-player counter so that low-confidence detections
+// (Inventory Sync) can be logged without ever contributing to an auto flag/kick/
+// ban. The visible dupe log still counts every attempt.
+function getEscCounts() {
+    try { const raw = world.getDynamicProperty(ESCALATION_COUNT_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveEscCounts(map) {
+    try { world.setDynamicProperty(ESCALATION_COUNT_PROPERTY, JSON.stringify(map)); } catch (e) {}
+}
 
 // Per-player last offense location, so admins can teleport to investigate.
 function getLastOffenses() {
@@ -36,17 +48,25 @@ function ensureDupeLogObjective() {
     }
 }
 
-function recordDupeAttempt(player) {
+// escalatable=false logs the attempt (visible in the dupe log) but never counts
+// toward or triggers auto-escalation — used for Inventory Sync, which has the
+// most false positives and shouldn't get anyone kicked or banned automatically.
+function recordDupeAttempt(player, escalatable = true) {
     try {
         ensureDupeLogObjective();
         const objective = world.scoreboard.getObjective(DUPE_LOG_OBJECTIVE);
         if (!objective) return;
         let current = 0;
         try { current = objective.getScore(player.name) ?? 0; } catch (e) {}
-        const newCount = current + 1;
-        objective.setScore(player.name, newCount);
+        objective.setScore(player.name, current + 1);
         recordLastOffense(player);
-        try { checkEscalation(player, newCount); } catch (e) {}
+        if (escalatable) {
+            const counts = getEscCounts();
+            const escCount = (counts[player.name] || 0) + 1;
+            counts[player.name] = escCount;
+            saveEscCounts(counts);
+            try { checkEscalation(player, escCount); } catch (e) {}
+        }
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe attempt: ${e}`); }
 }
 
@@ -82,6 +102,7 @@ function clearDupeLog() {
         for (const p of objective.getParticipants()) { try { objective.removeParticipant(p); } catch (e) {} }
         for (const pl of world.getPlayers()) { try { pl.removeTag(FLAGGED_TAG); } catch (e) {} }
         saveLastOffenses({});
+        saveEscCounts({});
     } catch (e) {}
 }
 
@@ -98,6 +119,7 @@ function clearDupeLogEntry(playerName) {
         } catch (e) {}
         removeFlag(playerName);
         try { const m = getLastOffenses(); delete m[playerName]; saveLastOffenses(m); } catch (e) {}
+        try { const c = getEscCounts(); delete c[playerName]; saveEscCounts(c); } catch (e) {}
         return existed;
     } catch (e) { return false; }
 }
@@ -1170,7 +1192,7 @@ function runSpawnCheck(player) {
                 detectedDupe = true;
                 const itemName = typeId.replace("minecraft:", "");
                 broadcastAlert(`§e${player.name} §ftried to sync duplicated §7${itemName}§f! Items removed.`);
-                recordDupeAttempt(player);
+                recordDupeAttempt(player, false); // low-confidence: log only, never auto-punish
                 recordDupeHistory(player.name, `Inventory Sync Exploit (${itemName} x${currentCount - savedCount})`, player.dimension.id);
                 let toRemove = currentCount - savedCount;
                 for (let i = 0; i < container.size; i++) {

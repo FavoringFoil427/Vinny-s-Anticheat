@@ -123,6 +123,17 @@ look like a surplus "dupe" and be removed. Guards added:
   false positives. It also bails if the inventory component isn't available yet.
 - `runSpawnCheck` skips entirely when the saved baseline is empty/untrusted.
 
+## Inventory Sync excluded from auto-escalation (new)
+
+Inventory Sync is the least reliable detector, so it must never get a player
+auto-flagged/kicked/banned. Escalation now uses its own per-player counter
+(`cheats:escalationCounts`) that only "confident" detections increment;
+`recordDupeAttempt(player, escalatable)` takes a flag, and the Inventory Sync
+path passes `false`. Inventory Sync attempts are still counted in the visible
+dupe log and history (so admins can review and act manually), but they neither
+trigger escalation nor inflate the count that other detections escalate on. The
+escalation counter is cleared alongside the log.
+
 ## Admin QoL tools (new)
 
 - **`/cheats:admin add/remove/list`** — grant/revoke the `admin` tag from inside
