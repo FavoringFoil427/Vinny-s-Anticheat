@@ -8,6 +8,36 @@ const DUPE_LOG_OBJECTIVE = "dupe_log";
 const DUPE_HISTORY_PROPERTY = "cheats:dupeHistory";
 const MAX_HISTORY_PER_PLAYER = 5;
 const ITEM_WHITELIST_PROPERTY = "cheats:itemWhitelist";
+const LAST_OFFENSE_PROPERTY = "cheats:lastOffense";
+const ESCALATION_COUNT_PROPERTY = "cheats:escalationCounts";
+
+// Escalation uses its own per-player counter so that low-confidence detections
+// (Inventory Sync) can be logged without ever contributing to an auto flag/kick/
+// ban. The visible dupe log still counts every attempt.
+function getEscCounts() {
+    try { const raw = world.getDynamicProperty(ESCALATION_COUNT_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveEscCounts(map) {
+    try { world.setDynamicProperty(ESCALATION_COUNT_PROPERTY, JSON.stringify(map)); } catch (e) {}
+}
+
+// Per-player last offense location, so admins can teleport to investigate.
+function getLastOffenses() {
+    try { const raw = world.getDynamicProperty(LAST_OFFENSE_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveLastOffenses(map) {
+    try { world.setDynamicProperty(LAST_OFFENSE_PROPERTY, JSON.stringify(map)); } catch (e) {}
+}
+function recordLastOffense(player) {
+    try {
+        const map = getLastOffenses();
+        const loc = player.location;
+        map[player.name] = { x: Math.floor(loc.x), y: Math.floor(loc.y), z: Math.floor(loc.z), dim: player.dimension.id };
+        saveLastOffenses(map);
+    } catch (e) {}
+}
 
 function ensureDupeLogObjective() {
     try {
@@ -18,16 +48,25 @@ function ensureDupeLogObjective() {
     }
 }
 
-function recordDupeAttempt(player) {
+// escalatable=false logs the attempt (visible in the dupe log) but never counts
+// toward or triggers auto-escalation — used for Inventory Sync, which has the
+// most false positives and shouldn't get anyone kicked or banned automatically.
+function recordDupeAttempt(player, escalatable = true) {
     try {
         ensureDupeLogObjective();
         const objective = world.scoreboard.getObjective(DUPE_LOG_OBJECTIVE);
         if (!objective) return;
         let current = 0;
         try { current = objective.getScore(player.name) ?? 0; } catch (e) {}
-        const newCount = current + 1;
-        objective.setScore(player.name, newCount);
-        try { checkEscalation(player, newCount); } catch (e) {}
+        objective.setScore(player.name, current + 1);
+        recordLastOffense(player);
+        if (escalatable) {
+            const counts = getEscCounts();
+            const escCount = (counts[player.name] || 0) + 1;
+            counts[player.name] = escCount;
+            saveEscCounts(counts);
+            try { checkEscalation(player, escCount); } catch (e) {}
+        }
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe attempt: ${e}`); }
 }
 
@@ -62,6 +101,8 @@ function clearDupeLog() {
         if (!objective) return;
         for (const p of objective.getParticipants()) { try { objective.removeParticipant(p); } catch (e) {} }
         for (const pl of world.getPlayers()) { try { pl.removeTag(FLAGGED_TAG); } catch (e) {} }
+        saveLastOffenses({});
+        saveEscCounts({});
     } catch (e) {}
 }
 
@@ -77,6 +118,8 @@ function clearDupeLogEntry(playerName) {
             }
         } catch (e) {}
         removeFlag(playerName);
+        try { const m = getLastOffenses(); delete m[playerName]; saveLastOffenses(m); } catch (e) {}
+        try { const c = getEscCounts(); delete c[playerName]; saveEscCounts(c); } catch (e) {}
         return existed;
     } catch (e) { return false; }
 }
@@ -275,11 +318,13 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `\n§aInfo:§r\n`;
                 msg += `  §f/cheats:ui §7- Open the control panel (operators)\n`;
                 msg += `  §f/cheats:status §7- View all toggle states\n`;
+                msg += `  §f/cheats:admin <add/remove/list> [player] §7- Manage admins (operator)\n`;
                 msg += `  §f/cheats:help §7- Show this list\n`;
                 if (isAdmin) {
                     msg += `\n§aAdmin §7(requires admin tag):§r\n`;
                     msg += `  §f/cheats:viewlog §7- View the dupe log\n`;
                     msg += `  §f/cheats:history <player> §7- View a player's history\n`;
+                    msg += `  §f/cheats:tp <player> §7- Teleport to a player's last offense\n`;
                     msg += `  §f/cheats:clearlog [player] §7- Clear the dupe log\n`;
                     msg += `  §f/cheats:banlist §7- View banned players\n`;
                     msg += `  §f/cheats:ban <player> §7- Ban a player\n`;
@@ -546,6 +591,66 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
+        { name: "cheats:admin", description: "Manage anticheat admins (requires operator)", permissionLevel: CommandPermissionLevel.GameDirectors,
+          mandatoryParameters: [{ name: "action", type: CustomCommandParamType.String }],
+          optionalParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, action, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                const act = (action || "").toLowerCase();
+                if (act === "list") {
+                    const admins = world.getPlayers().filter((p) => p.hasTag("admin")).map((p) => p.name);
+                    if (admins.length === 0) { player.sendMessage(`§e[Anticheat]§r No online players have the admin tag.`); return; }
+                    let msg = `§e[Anticheat] §lAdmins online§r §7(${admins.length})§r\n`;
+                    for (const n of admins) msg += `  §a${n}\n`;
+                    player.sendMessage(msg);
+                    return;
+                }
+                const name = (playerName || "").trim();
+                if (!name) { player.sendMessage(`§e[Anticheat]§c Please specify a player name.`); return; }
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (!target) { player.sendMessage(`§e[Anticheat]§c Player §f${name}§c not found (must be online).`); return; }
+                if (act === "add") {
+                    if (target.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§r §a${name}§r is already an admin.`); return; }
+                    target.addTag("admin");
+                    player.sendMessage(`§e[Anticheat]§r §a${name}§r is now an admin.`);
+                    target.sendMessage(`§e[Anticheat]§r You have been made an anticheat §aadmin§r.`);
+                } else if (act === "remove") {
+                    if (!target.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§r §f${name}§r is not an admin.`); return; }
+                    target.removeTag("admin");
+                    player.sendMessage(`§e[Anticheat]§r §c${name}§r is no longer an admin.`);
+                } else {
+                    player.sendMessage(`§e[Anticheat]§c Unknown action. Use: add, remove, or list`);
+                }
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:tp", description: "Teleport to a player's last dupe location (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                if (!name) { player.sendMessage(`§e[Anticheat]§c Please specify a player name.`); return; }
+                const loc = getLastOffenses()[name];
+                if (!loc) { player.sendMessage(`§e[Anticheat]§r No recorded offense location for §c${name}§r.`); return; }
+                try {
+                    player.teleport({ x: loc.x + 0.5, y: loc.y, z: loc.z + 0.5 }, { dimension: world.getDimension(loc.dim) });
+                    player.sendMessage(`§e[Anticheat]§r Teleported to §c${name}§r's last offense §7(${loc.x}, ${loc.y}, ${loc.z} in ${loc.dim.replace("minecraft:", "")})§r.`);
+                } catch (e) { player.sendMessage(`§e[Anticheat]§c Teleport failed: ${e}`); }
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
         { name: "cheats:whitelist", description: "Manage the item whitelist (requires admin tag)", permissionLevel: CommandPermissionLevel.GameDirectors,
           mandatoryParameters: [{ name: "action", type: CustomCommandParamType.String }],
           optionalParameters: [{ name: "itemId", type: CustomCommandParamType.String }] },
@@ -716,9 +821,20 @@ async function showPlayerHistory(player, name) {
         body = `§7Total attempts: ${total}§r\n`;
         for (const h of history) body += `\n§e${h.timestamp}§r\n§fType: ${h.type}§r\n§fDimension: ${h.dimension}§r\n`;
     }
-    const form = new ActionFormData().title(`History: ${name}`).body(body).button("Back");
+    const loc = getLastOffenses()[name];
+    const form = new ActionFormData().title(`History: ${name}`).body(body);
+    if (loc) form.button(`Teleport to last offense\n§7${loc.x}, ${loc.y}, ${loc.z}`);
+    form.button("Back");
     const r = await showForm(player, form);
-    if (r && !r.canceled) await openMainMenu(player);
+    if (!r || r.canceled) return;
+    if (loc && r.selection === 0) {
+        try {
+            player.teleport({ x: loc.x + 0.5, y: loc.y, z: loc.z + 0.5 }, { dimension: world.getDimension(loc.dim) });
+            player.sendMessage(`§e[Anticheat]§r Teleported to §c${name}§r's last offense §7(${loc.x}, ${loc.y}, ${loc.z})§r.`);
+        } catch (e) { player.sendMessage(`§e[Anticheat]§c Teleport failed: ${e}`); }
+        return;
+    }
+    await openMainMenu(player);
 }
 
 async function openHistoryPrompt(player) {
@@ -1076,7 +1192,7 @@ function runSpawnCheck(player) {
                 detectedDupe = true;
                 const itemName = typeId.replace("minecraft:", "");
                 broadcastAlert(`§e${player.name} §ftried to sync duplicated §7${itemName}§f! Items removed.`);
-                recordDupeAttempt(player);
+                recordDupeAttempt(player, false); // low-confidence: log only, never auto-punish
                 recordDupeHistory(player.name, `Inventory Sync Exploit (${itemName} x${currentCount - savedCount})`, player.dimension.id);
                 let toRemove = currentCount - savedCount;
                 for (let i = 0; i < container.size; i++) {
