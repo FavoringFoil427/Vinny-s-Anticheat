@@ -1,4 +1,5 @@
-import { world, system, CommandPermissionLevel, CustomCommandParamType } from "@minecraft/server";
+import { world, system, CommandPermissionLevel, CustomCommandParamType, ItemStack } from "@minecraft/server";
+import { ActionFormData, ModalFormData, MessageFormData, FormCancelationReason } from "@minecraft/server-ui";
 
 console.warn("[Vinny's Anticheat] Script loading...");
 
@@ -24,7 +25,9 @@ function recordDupeAttempt(player) {
         if (!objective) return;
         let current = 0;
         try { current = objective.getScore(player.name) ?? 0; } catch (e) {}
-        objective.setScore(player.name, current + 1);
+        const newCount = current + 1;
+        objective.setScore(player.name, newCount);
+        try { checkEscalation(player, newCount); } catch (e) {}
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe attempt: ${e}`); }
 }
 
@@ -58,6 +61,7 @@ function clearDupeLog() {
         const objective = world.scoreboard.getObjective(DUPE_LOG_OBJECTIVE);
         if (!objective) return;
         for (const p of objective.getParticipants()) { try { objective.removeParticipant(p); } catch (e) {} }
+        for (const pl of world.getPlayers()) { try { pl.removeTag(FLAGGED_TAG); } catch (e) {} }
     } catch (e) {}
 }
 
@@ -72,6 +76,7 @@ function clearDupeLogEntry(playerName) {
                 if (p.displayName === playerName) { objective.removeParticipant(p); break; }
             }
         } catch (e) {}
+        removeFlag(playerName);
         return existed;
     } catch (e) { return false; }
 }
@@ -126,7 +131,18 @@ function isWhitelisted(typeId) {
 
 // --- ALERT ---
 function broadcastAlert(message) {
-    world.sendMessage(`§l§e[Anticheat] §c§lALERT: §f${message}`);
+    const full = `§l§e[Anticheat] §c§lALERT: §f${message}`;
+    if (getAdminOnlyAlerts()) {
+        for (const p of world.getPlayers()) { if (p.hasTag("admin")) p.sendMessage(full); }
+    } else {
+        world.sendMessage(full);
+    }
+}
+
+// Escalation / severe notices always go to admins regardless of the alert mode.
+function notifyAdmins(message) {
+    const full = `§l§e[Anticheat] §c§lESCALATION: §f${message}`;
+    for (const p of world.getPlayers()) { if (p.hasTag("admin")) p.sendMessage(full); }
 }
 
 // --- SETTINGS ---
@@ -136,6 +152,12 @@ const ILLEGAL_ITEMS_PROPERTY = "cheats:illegalItems";
 const BANNED_BLOCKS_PROPERTY = "cheats:bannedBlocks";
 const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
 const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
+const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
+const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
+const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
+const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
+const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
+const FLAGGED_TAG = "cheats:flagged";
 
 function getBundleBlockingSetting() { return world.getDynamicProperty(BUNDLE_BLOCK_PROPERTY) ?? true; }
 function setBundleBlockingSetting(v) { world.setDynamicProperty(BUNDLE_BLOCK_PROPERTY, v); }
@@ -149,6 +171,44 @@ function getBedrockProtectionSetting() { return world.getDynamicProperty(BEDROCK
 function setBedrockProtectionSetting(v) { world.setDynamicProperty(BEDROCK_PROTECTION_PROPERTY, v); }
 function getMinecartProtectionSetting() { return world.getDynamicProperty(MINECART_PROTECTION_PROPERTY) ?? true; }
 function setMinecartProtectionSetting(v) { world.setDynamicProperty(MINECART_PROTECTION_PROPERTY, v); }
+function getPistonProtectionSetting() { return world.getDynamicProperty(PISTON_PROTECTION_PROPERTY) ?? true; }
+function setPistonProtectionSetting(v) { world.setDynamicProperty(PISTON_PROTECTION_PROPERTY, v); }
+function getPortalProtectionSetting() { return world.getDynamicProperty(PORTAL_PROTECTION_PROPERTY) ?? true; }
+function setPortalProtectionSetting(v) { world.setDynamicProperty(PORTAL_PROTECTION_PROPERTY, v); }
+function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
+function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
+function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
+function setEscalationThreshold(v) { world.setDynamicProperty(ESCALATION_THRESHOLD_PROPERTY, v); }
+function getEscalationKick() { return world.getDynamicProperty(ESCALATION_KICK_PROPERTY) ?? false; }
+function setEscalationKick(v) { world.setDynamicProperty(ESCALATION_KICK_PROPERTY, v); }
+
+// Called after an attempt count is incremented. Once a player crosses the
+// configured threshold they are flagged (tag) and admins are notified once;
+// if kick-on-threshold is enabled the player is also kicked. The flag tag
+// prevents this from re-firing every subsequent attempt until the log is
+// cleared for that player.
+function checkEscalation(player, newCount) {
+    if (player.hasTag("admin")) return; // never auto-flag/kick admins (e.g. while testing)
+    const threshold = getEscalationThreshold();
+    if (threshold <= 0 || newCount < threshold) return;
+    if (player.hasTag(FLAGGED_TAG)) return;
+    try { player.addTag(FLAGGED_TAG); } catch (e) {}
+    const kick = getEscalationKick();
+    notifyAdmins(`§e${player.name}§f reached §c${newCount}§f attempts — ${kick ? "§ckicking" : "§eflagged"}§f.`);
+    if (kick) {
+        const cmd = `kick "${player.name}" Anticheat: repeated dupe/exploit attempts`;
+        try { player.dimension.runCommand(cmd); }
+        catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
+    }
+}
+
+// Remove the escalation flag from a player (by name) if they are online, so
+// clearing their log gives them a clean slate.
+function removeFlag(playerName) {
+    for (const p of world.getPlayers()) {
+        if (p.name === playerName) { try { p.removeTag(FLAGGED_TAG); } catch (e) {} }
+    }
+}
 
 // --- COMMANDS ---
 system.beforeEvents.startup.subscribe((init) => {
@@ -170,7 +230,12 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bannedblocks §7- Toggle Banned Block Detection\n`;
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
+                msg += `  §f/cheats:piston §7- Toggle Piston Dupe Protection\n`;
+                msg += `  §f/cheats:portal §7- Toggle Nether Portal Dupe Protection\n`;
+                msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
+                msg += `  §f/cheats:escalate [n] §7- Set auto-flag/kick threshold (0=off)\n`;
                 msg += `\n§aInfo:§r\n`;
+                msg += `  §f/cheats:ui §7- Open the control panel (operators)\n`;
                 msg += `  §f/cheats:status §7- View all toggle states\n`;
                 msg += `  §f/cheats:help §7- Show this list\n`;
                 if (isAdmin) {
@@ -200,7 +265,11 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Illegal Item Detection: ${getIllegalItemsSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Banned Block Detection: ${getBannedBlocksSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n`
+                    `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}§r\n`
                 );
             });
             return { status: 0 };
@@ -263,6 +332,56 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getMinecartProtectionSetting(); setMinecartProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Minecart Dupe Detection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:piston", description: "Toggle Piston Dupe Protection", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getPistonProtectionSetting(); setPistonProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Piston Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:portal", description: "Toggle Nether Portal Dupe Protection", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getPortalProtectionSetting(); setPortalProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Nether Portal Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:alerts", description: "Toggle admin-only alerts", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getAdminOnlyAlerts(); setAdminOnlyAlerts(v); player.sendMessage(`§e[Anticheat]§r Admin-Only Alerts: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:escalate", description: "Set auto-escalation threshold (0 = off)", permissionLevel: CommandPermissionLevel.GameDirectors,
+          optionalParameters: [{ name: "threshold", type: CustomCommandParamType.Integer }] },
+        (origin, threshold) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (threshold === undefined || threshold === null) {
+                    const t = getEscalationThreshold();
+                    player.sendMessage(`§e[Anticheat]§r Auto-escalation: ${t > 0 ? `§aAt ${t} attempts (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}`);
+                    return;
+                }
+                const t = Math.max(0, Math.floor(threshold));
+                setEscalationThreshold(t);
+                player.sendMessage(`§e[Anticheat]§r Auto-escalation threshold set to §a${t}§r${t === 0 ? " §7(disabled)" : ""}.`);
+            });
             return { status: 0 };
         }
     );
@@ -386,7 +505,227 @@ system.beforeEvents.startup.subscribe((init) => {
             return { status: 0 };
         }
     );
+
+    registry.registerCommand(
+        { name: "cheats:ui", description: "Open the Anticheat control panel (requires admin tag)", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            // Forms cannot be shown from the read-only command context, so defer
+            // to the next tick. openMainMenu retries past the initial "UserBusy".
+            system.run(() => {
+                // Operator level alone is not enough — the panel is admin-tag gated.
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission. (requires admin tag)`); return; }
+                openMainMenu(player).catch((e) => console.warn(`[Anticheat] UI error: ${e}`));
+            });
+            return { status: 0 };
+        }
+    );
 });
+
+// --- UI CONTROL PANEL ---
+// Opening a form right after a command sometimes returns UserBusy (the chat is
+// still closing). Retry a few times before giving up.
+async function showForm(player, form) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        const response = await form.show(player);
+        if (response.canceled && response.cancelationReason === FormCancelationReason.UserBusy) {
+            await system.waitTicks(10);
+            continue;
+        }
+        return response;
+    }
+    return undefined;
+}
+
+async function openMainMenu(player) {
+    const isAdmin = player.hasTag("admin");
+    const form = new ActionFormData()
+        .title("Vinny's Anticheat")
+        .body("Select an option:");
+    const actions = [];
+    form.button("Settings & Toggles");
+    actions.push(openTogglesMenu);
+    if (isAdmin) {
+        form.button("Dupe Log");        actions.push(openDupeLogMenu);
+        form.button("Player History");  actions.push(openHistoryPrompt);
+        form.button("Clear Log");       actions.push(openClearLogMenu);
+        form.button("Whitelist");       actions.push(openWhitelistMenu);
+    }
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const handler = actions[res.selection];
+    if (handler) await handler(player);
+}
+
+async function openTogglesMenu(player) {
+    const form = new ModalFormData()
+        .title("Settings")
+        .toggle("Bundle/Shulker Box Blocking", { defaultValue: getBundleBlockingSetting() })
+        .toggle("Inventory Sync", { defaultValue: getInventorySyncSetting() })
+        .toggle("Illegal Item Detection", { defaultValue: getIllegalItemsSetting() })
+        .toggle("Banned Block Detection", { defaultValue: getBannedBlocksSetting() })
+        .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
+        .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() })
+        .toggle("Piston Dupe Protection", { defaultValue: getPistonProtectionSetting() })
+        .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
+        .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
+        .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
+        .toggle("Kick at threshold (off = flag only)", { defaultValue: getEscalationKick() });
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const v = res.formValues;
+    setBundleBlockingSetting(!!v[0]);
+    setInventorySyncSetting(!!v[1]);
+    setIllegalItemsSetting(!!v[2]);
+    setBannedBlocksSetting(!!v[3]);
+    setBedrockProtectionSetting(!!v[4]);
+    setMinecartProtectionSetting(!!v[5]);
+    setPistonProtectionSetting(!!v[6]);
+    setPortalProtectionSetting(!!v[7]);
+    setAdminOnlyAlerts(!!v[8]);
+    setEscalationThreshold(Math.max(0, Math.floor(v[9] ?? 0)));
+    setEscalationKick(!!v[10]);
+    player.sendMessage("§e[Anticheat]§r Settings updated.");
+}
+
+async function openDupeLogMenu(player) {
+    const entries = getDupeLogEntries();
+    const form = new ActionFormData().title("Dupe Log");
+    if (entries.length === 0) {
+        form.body("The dupe log is empty.").button("Back");
+        const r = await showForm(player, form);
+        if (r && !r.canceled) await openMainMenu(player);
+        return;
+    }
+    form.body(`${entries.length} player(s) logged. Select one to view history.`);
+    for (const e of entries) form.button(`${e.name}\n§7${e.count} attempt${e.count !== 1 ? "s" : ""}`);
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const chosen = entries[res.selection];
+    if (chosen) await showPlayerHistory(player, chosen.name);
+}
+
+async function showPlayerHistory(player, name) {
+    const history = getDupeHistory()[name];
+    const objective = world.scoreboard.getObjective(DUPE_LOG_OBJECTIVE);
+    let total = 0;
+    if (objective) { try { total = objective.getScore(name) ?? 0; } catch (e) {} }
+    let body;
+    if (!history || history.length === 0) {
+        body = `No history found for ${name}.`;
+    } else {
+        body = `§7Total attempts: ${total}§r\n`;
+        for (const h of history) body += `\n§e${h.timestamp}§r\n§fType: ${h.type}§r\n§fDimension: ${h.dimension}§r\n`;
+    }
+    const form = new ActionFormData().title(`History: ${name}`).body(body).button("Back");
+    const r = await showForm(player, form);
+    if (r && !r.canceled) await openMainMenu(player);
+}
+
+async function openHistoryPrompt(player) {
+    const form = new ModalFormData().title("Player History").textField("Player name", "Enter exact name");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const name = (res.formValues[0] || "").trim();
+    if (!name) { player.sendMessage("§e[Anticheat]§c No name entered."); return; }
+    await showPlayerHistory(player, name);
+}
+
+async function openClearLogMenu(player) {
+    const form = new ActionFormData()
+        .title("Clear Dupe Log")
+        .body("Choose what to clear:")
+        .button("Clear ALL")
+        .button("Clear a specific player")
+        .button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    if (res.selection === 0) {
+        const confirm = new MessageFormData()
+            .title("Confirm")
+            .body("Clear the ENTIRE dupe log? This cannot be undone.")
+            .button1("Cancel")
+            .button2("Clear ALL");
+        const c = await showForm(player, confirm);
+        if (c && !c.canceled && c.selection === 1) {
+            clearDupeLog(); clearDupeHistoryAll();
+            player.sendMessage("§e[Anticheat]§r Dupe log §acleared§r.");
+        }
+    } else if (res.selection === 1) {
+        const modal = new ModalFormData().title("Clear Player").textField("Player name", "Enter exact name");
+        const m = await showForm(player, modal);
+        if (m && !m.canceled) {
+            const name = (m.formValues[0] || "").trim();
+            if (!name) { player.sendMessage("§e[Anticheat]§c No name entered."); return; }
+            clearDupeLogEntry(name); clearDupeHistoryEntry(name);
+            player.sendMessage(`§e[Anticheat]§r Cleared log for §c${name}§r.`);
+        }
+    } else {
+        await openMainMenu(player);
+    }
+}
+
+async function openWhitelistMenu(player) {
+    const list = getItemWhitelist();
+    const form = new ActionFormData()
+        .title("Item Whitelist")
+        .body(list.length ? `${list.length} item(s) whitelisted.` : "Whitelist is empty.")
+        .button("View List")
+        .button("Add by ID")
+        .button("Add Item in Hand")
+        .button("Remove Item")
+        .button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    switch (res.selection) {
+        case 0: {
+            const body = list.length ? list.map((i) => `§f${i}`).join("\n") : "Whitelist is empty.";
+            const f = new ActionFormData().title("Whitelist").body(body).button("Back");
+            const r = await showForm(player, f);
+            if (r && !r.canceled) await openWhitelistMenu(player);
+            break;
+        }
+        case 1: {
+            const modal = new ModalFormData().title("Add to Whitelist").textField("Item ID", "e.g. diamond or minecraft:diamond");
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const raw = (m.formValues[0] || "").trim();
+                if (!raw) { player.sendMessage("§e[Anticheat]§c No item ID entered."); break; }
+                const normalized = raw.startsWith("minecraft:") ? raw : `minecraft:${raw}`;
+                const l = getItemWhitelist();
+                if (l.includes(normalized)) player.sendMessage("§e[Anticheat]§r Already whitelisted.");
+                else { l.push(normalized); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §a${normalized}§r added.`); }
+            }
+            break;
+        }
+        case 2: {
+            try {
+                const item = player.getComponent("equippable")?.getEquipment("Mainhand");
+                if (!item) { player.sendMessage("§e[Anticheat]§c You are not holding any item."); break; }
+                const normalized = item.typeId.startsWith("minecraft:") ? item.typeId : `minecraft:${item.typeId}`;
+                const l = getItemWhitelist();
+                if (l.includes(normalized)) player.sendMessage("§e[Anticheat]§r Already whitelisted.");
+                else { l.push(normalized); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §a${normalized}§r added.`); }
+            } catch (e) { player.sendMessage(`§e[Anticheat]§c Error: ${e}`); }
+            break;
+        }
+        case 3: {
+            if (list.length === 0) { player.sendMessage("§e[Anticheat]§r Whitelist is empty."); break; }
+            const modal = new ModalFormData().title("Remove from Whitelist").dropdown("Select item", list, { defaultValueIndex: 0 });
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const target = list[m.formValues[0]];
+                const l = getItemWhitelist();
+                const i = l.indexOf(target);
+                if (i !== -1) { l.splice(i, 1); saveItemWhitelist(l); player.sendMessage(`§e[Anticheat]§r §c${target}§r removed.`); }
+            }
+            break;
+        }
+        default:
+            await openMainMenu(player);
+    }
+}
 
 // --- ILLEGAL ITEMS DEFINITION ---
 const ILLEGAL_ITEMS = new Set([
@@ -460,14 +799,15 @@ function handleIllegalContainer(container, player) {
 function scanNearbyContainers() {
     const bundleOn = getBundleBlockingSetting();
     const illegalOn = getIllegalItemsSetting();
-    if (!bundleOn && !illegalOn) return;
+    const pistonOn = getPistonProtectionSetting();
+    if (!bundleOn && !illegalOn && !pistonOn) return;
 
     for (const player of world.getPlayers()) {
         try {
             const isAdmin = player.hasTag("admin");
-            // Admins bypass illegal-item sweeping; bundle blocking applies to everyone.
+            // Admins bypass illegal-item sweeping; bundle/piston protection applies to everyone.
             const scanIllegal = illegalOn && !isAdmin;
-            if (!bundleOn && !scanIllegal) continue;
+            if (!bundleOn && !scanIllegal && !pistonOn) continue;
 
             const pos = player.location;
             const dimension = player.dimension;
@@ -479,6 +819,7 @@ function scanNearbyContainers() {
                             const block = dimension.getBlock({ x: baseX + dx, y: baseY + dy, z: baseZ + dz });
                             if (!block) continue;
                             const typeId = block.typeId;
+                            if (pistonOn && isPistonType(typeId)) { checkPistonSetup(block, dimension); continue; }
                             const doBundle = bundleOn && isBundleScanContainer(typeId);
                             const doIllegal = scanIllegal && isIllegalScanContainer(typeId);
                             if (!doBundle && !doIllegal) continue;
@@ -532,44 +873,48 @@ function getPlayerInventoryMap(player) {
     return counts;
 }
 
-const pendingUpdates = new Map();
-const lastCommittedCounts = new Map();
+function totalItems(counts) {
+    let total = 0;
+    for (const id in counts) total += counts[id];
+    return total;
+}
 
+// Snapshot the player's live inventory. Written continuously so the most recent
+// snapshot reflects what they legitimately held before a disconnect. Undebounced
+// so the baseline always matches the real online inventory.
+//
+// Teleport / chunk-reload hardening: while a player is being reloaded (a TP mod,
+// dimension change, or the chunk streaming back in) the inventory can briefly
+// read EMPTY or PARTIAL. If that transient read were saved as the baseline, the
+// player's real items would look like a surplus "dupe" moments later and get
+// deleted. So we never let a suspicious shrink overwrite a good snapshot: a
+// stale-but-higher baseline is safe (it can only miss a dupe, never invent one),
+// whereas a too-low baseline is exactly what fabricates false positives.
 function savePlayerInventory(player) {
     if (!getInventorySyncSetting()) return;
     try {
+        const container = player.getComponent("inventory")?.container;
+        if (!container) return; // entity mid-reload; not safe to snapshot
         const currentCounts = getPlayerInventoryMap(player);
-        const playerId = player.id;
-        if (!lastCommittedCounts.has(playerId)) {
-            const stored = world.getDynamicProperty(`dp_inv_${playerId}`);
-            lastCommittedCounts.set(playerId, stored ? JSON.parse(stored) : {});
+        const total = totalItems(currentCounts);
+        const prevRaw = world.getDynamicProperty(`dp_inv_${player.id}`);
+        if (prevRaw) {
+            const prevTotal = totalItems(JSON.parse(prevRaw));
+            // Empty read over a non-empty baseline, or a drastic (>50%) shrink,
+            // is almost always a transient reload rather than a real change.
+            if (prevTotal > 0 && total === 0) return;
+            if (prevTotal > 0 && total < prevTotal * 0.5) return;
         }
-        const committed = lastCommittedCounts.get(playerId);
-        let hasIncrease = false;
-        for (const id in currentCounts) {
-            if ((currentCounts[id] || 0) > (committed[id] || 0)) { hasIncrease = true; break; }
-        }
-        if (hasIncrease) {
-            let pending = pendingUpdates.get(playerId);
-            if (pending && Date.now() - pending.timestamp > 1000) {
-                world.setDynamicProperty(`dp_inv_${playerId}`, JSON.stringify(currentCounts));
-                lastCommittedCounts.set(playerId, currentCounts);
-                pendingUpdates.delete(playerId);
-            } else if (!pending) {
-                pendingUpdates.set(playerId, { counts: currentCounts, timestamp: Date.now() });
-            }
-        } else {
-            world.setDynamicProperty(`dp_inv_${playerId}`, JSON.stringify(currentCounts));
-            lastCommittedCounts.set(playerId, currentCounts);
-            pendingUpdates.delete(playerId);
-        }
+        world.setDynamicProperty(`dp_inv_${player.id}`, JSON.stringify(currentCounts));
     } catch (e) {}
 }
 
+// Once per second is plenty to keep a fresh pre-disconnect snapshot, and it
+// avoids writing a dynamic property several times per second per player.
 system.runInterval(() => {
     if (!getInventorySyncSetting()) return;
     for (const player of world.getPlayers()) savePlayerInventory(player);
-}, 5);
+}, 20);
 
 function runSpawnCheck(player) {
     try {
@@ -577,10 +922,12 @@ function runSpawnCheck(player) {
         const savedStr = world.getDynamicProperty(`dp_inv_${player.id}`);
         if (!savedStr) return;
         const savedMap = JSON.parse(savedStr);
+        // No trustworthy baseline to compare against -> never flag.
+        if (totalItems(savedMap) === 0) return;
+        const container = player.getComponent("inventory")?.container;
+        if (!container) return; // still loading; re-checking later is safe
         const currentMap = getPlayerInventoryMap(player);
         let detectedDupe = false;
-        const container = player.getComponent("inventory")?.container;
-        if (!container) return;
         for (const typeId in currentMap) {
             const currentCount = currentMap[typeId];
             const savedCount = savedMap[typeId] || 0;
@@ -613,16 +960,13 @@ function runSpawnCheck(player) {
 
 world.afterEvents.playerSpawn.subscribe((event) => {
     if (!getInventorySyncSetting()) return;
+    // Only check on an actual join/rejoin. Death-respawns and other spawns are
+    // normal play — checking them turns legitimate item pickups into false
+    // "dupe" removals. The inventory-sync exploit can only add items while the
+    // player is OFFLINE, so a rejoin is the only moment worth comparing.
+    if (!event.initialSpawn) return;
     const player = event.player;
     system.runTimeout(() => runSpawnCheck(player), 40);
-});
-
-// Drop per-player runtime caches when a player leaves so the Maps don't grow
-// unbounded. The persisted dp_inv_<id> property is intentionally kept so the
-// relog dupe check still has a baseline to compare against on rejoin.
-world.afterEvents.playerLeave.subscribe((event) => {
-    lastCommittedCounts.delete(event.playerId);
-    pendingUpdates.delete(event.playerId);
 });
 
 // --- ILLEGAL ITEMS: PLAYER INVENTORY SCAN ---
@@ -709,3 +1053,235 @@ world.afterEvents.entityRemove.subscribe((event) => {
     recentMinecartBreaks.set(key, now);
     system.runTimeout(() => recentMinecartBreaks.delete(key), 5000);
 });
+
+// --- PISTON CONTAINER DUPE PROTECTION ---
+// Pushing a container block-entity (shulker box / chest / barrel) with a piston
+// is a known Bedrock duplication glitch. We break the setup by popping the
+// PISTON off (returned as an item so no block is lost) — never the container or
+// its contents, so a false positive costs at most one piston.
+//
+// The glitch has many geometric variants: the container directly in front, a
+// block (e.g. a lightning rod) pushed INTO the container, or the container
+// offset a block from the piston/pushed block. So rather than match one shape,
+// we (1) catch the obvious "piston aimed straight at a container" at placement
+// time with correct attribution, and (2) continuously sweep every piston near a
+// player, tracing its full push line and checking for adjacent shulkers, and pop
+// any piston that could move a container. The sweep can't reliably attribute to
+// a builder, so it only removes + alerts; the placement path is what escalates.
+function isPistonDupeContainer(typeId) {
+    if (!typeId) return false;
+    if (typeId.endsWith("shulker_box")) return true;
+    return typeId === "minecraft:chest" || typeId === "minecraft:trapped_chest" || typeId === "minecraft:barrel";
+}
+
+function isPistonType(typeId) {
+    return typeId === "minecraft:piston" || typeId === "minecraft:sticky_piston";
+}
+
+// Blocks a piston physically cannot push past — stop tracing the push line here.
+function isImmovableForPiston(typeId) {
+    return typeId === "minecraft:air" || typeId === "minecraft:obsidian" ||
+        typeId === "minecraft:bedrock" || typeId === "minecraft:barrier" ||
+        isPistonType(typeId);
+}
+
+// facing_direction (legacy integer) -> the offset the piston pushes toward.
+const PISTON_FACING_OFFSETS = {
+    0: { x: 0, y: -1, z: 0 }, 1: { x: 0, y: 1, z: 0 },
+    2: { x: 0, y: 0, z: -1 }, 3: { x: 0, y: 0, z: 1 },
+    4: { x: -1, y: 0, z: 0 }, 5: { x: 1, y: 0, z: 0 },
+};
+// minecraft:facing_direction (newer string trait) -> same offsets.
+const FACING_STRING_OFFSETS = {
+    down: { x: 0, y: -1, z: 0 }, up: { x: 0, y: 1, z: 0 },
+    north: { x: 0, y: 0, z: -1 }, south: { x: 0, y: 0, z: 1 },
+    west: { x: -1, y: 0, z: 0 }, east: { x: 1, y: 0, z: 0 },
+};
+
+// Read a piston's push direction. Different versions/blocks expose it as either
+// the legacy integer `facing_direction` or the string `minecraft:facing_direction`,
+// so try both before giving up.
+function pistonFacingOffset(pistonBlock) {
+    try {
+        const perm = pistonBlock.permutation;
+        const f = perm.getState("facing_direction");
+        if (f !== undefined && f !== null && PISTON_FACING_OFFSETS[f]) return PISTON_FACING_OFFSETS[f];
+        const s = perm.getState("minecraft:facing_direction");
+        if (typeof s === "string" && FACING_STRING_OFFSETS[s]) return FACING_STRING_OFFSETS[s];
+        return null;
+    } catch (e) { return null; }
+}
+
+// Pop a piston that is set up to push a container, returning it as an item.
+// A player is passed only when we can attribute it (placement); the sweep passes
+// null and only removes + alerts, to avoid escalating the wrong nearby player.
+function neutralizePistonSetup(pistonBlock, containerName, player) {
+    try {
+        const dimension = pistonBlock.dimension;
+        const loc = { x: pistonBlock.location.x, y: pistonBlock.location.y, z: pistonBlock.location.z };
+        const pistonType = pistonBlock.typeId;
+        dimension.setBlockType(loc, "minecraft:air");
+        try { dimension.spawnItem(new ItemStack(pistonType, 1), { x: loc.x + 0.5, y: loc.y + 0.5, z: loc.z + 0.5 }); } catch (e) {}
+        broadcastAlert(`§fA §cpiston ${containerName} dupe§f was blocked at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+        if (player) {
+            recordDupeAttempt(player);
+            recordDupeHistory(player.name, `Piston Dupe: ${containerName}`, player.dimension.id);
+        }
+        for (const p of dimension.getPlayers({ location: loc, maxDistance: 16 })) {
+            try { p.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
+        }
+    } catch (e) {}
+}
+
+// True if any of the 6 blocks touching (x,y,z) is a shulker box.
+function hasAdjacentShulker(dimension, x, y, z) {
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    for (const [dx, dy, dz] of dirs) {
+        try {
+            const b = dimension.getBlock({ x: x + dx, y: y + dy, z: z + dz });
+            if (b && b.typeId.endsWith("shulker_box")) return true;
+        } catch (e) {}
+    }
+    return false;
+}
+
+// Sweep check (called for each piston found near a player). Reading the piston's
+// facing proved unreliable across versions, so we use position, not direction: a
+// shulker touching the piston on ANY side pops it (a shulker next to a piston is
+// virtually never a legit build). We still trace the push line as a bonus so a
+// container behind a pushed block (e.g. a lightning rod), or a chest/barrel in
+// the push path, is caught too.
+function checkPistonSetup(pistonBlock, dimension) {
+    try {
+        const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
+        if (hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+        const off = pistonFacingOffset(pistonBlock);
+        if (!off) return; // push-line bonus needs facing; adjacency above already ran
+        for (let i = 1; i <= 12; i++) {
+            const cx = px + off.x * i, cy = py + off.y * i, cz = pz + off.z * i;
+            const b = dimension.getBlock({ x: cx, y: cy, z: cz });
+            if (!b) return;
+            const t = b.typeId;
+            if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+            if (hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+            if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
+        }
+    } catch (e) {}
+}
+
+// Placement detector: catch the obvious "piston aimed straight at a container"
+// setup the moment it is built, attributed to (and escalating) the placer.
+world.afterEvents.playerPlaceBlock.subscribe((event) => {
+    if (!getPistonProtectionSetting()) return;
+    try {
+        const player = event.player;
+        const block = event.block;
+        const dimension = block.dimension;
+        if (isPistonType(block.typeId)) {
+            const off = pistonFacingOffset(block);
+            if (!off) return;
+            const front = dimension.getBlock({ x: block.location.x + off.x, y: block.location.y + off.y, z: block.location.z + off.z });
+            if (front && isPistonDupeContainer(front.typeId)) {
+                const name = front.typeId.replace("minecraft:", "");
+                system.run(() => neutralizePistonSetup(block, name, player));
+            }
+        } else if (isPistonDupeContainer(block.typeId)) {
+            for (const key in PISTON_FACING_OFFSETS) {
+                const o = PISTON_FACING_OFFSETS[key];
+                const nb = dimension.getBlock({ x: block.location.x - o.x, y: block.location.y - o.y, z: block.location.z - o.z });
+                if (nb && isPistonType(nb.typeId)) {
+                    const nbOff = pistonFacingOffset(nb);
+                    if (nbOff && nbOff.x === o.x && nbOff.y === o.y && nbOff.z === o.z) {
+                        const name = block.typeId.replace("minecraft:", "");
+                        system.run(() => neutralizePistonSetup(nb, name, player));
+                        break;
+                    }
+                }
+            }
+        }
+    } catch (e) {}
+});
+
+// --- DUPED-CONTAINER-ITEM CLEANUP ---
+// Geometry-independent safety net: when a piston dupe fires it drops the extra
+// container as an item entity. If two or more of the SAME container item appear
+// at the same spot next to a piston within ~1s, the extras are the duped copies
+// — delete them (keeping one). Scoped to piston-adjacent drops so ordinary
+// shulker drops from breaking/dropping are never touched.
+const recentContainerDrops = new Map(); // "x,y,z" -> count within the window
+
+function pistonWithin(dimension, loc, radius) {
+    const bx = Math.floor(loc.x), by = Math.floor(loc.y), bz = Math.floor(loc.z);
+    for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+            for (let dz = -radius; dz <= radius; dz++) {
+                try {
+                    const b = dimension.getBlock({ x: bx + dx, y: by + dy, z: bz + dz });
+                    if (b && isPistonType(b.typeId)) return true;
+                } catch (e) {}
+            }
+        }
+    }
+    return false;
+}
+
+world.afterEvents.entitySpawn.subscribe((event) => {
+    if (!getPistonProtectionSetting()) return;
+    try {
+        const ent = event.entity;
+        if (!ent || ent.typeId !== "minecraft:item") return;
+        const stack = ent.getComponent("minecraft:item")?.itemStack;
+        if (!stack || !isPistonDupeContainer(stack.typeId)) return;
+        const dimension = ent.dimension;
+        const loc = ent.location;
+        if (!pistonWithin(dimension, loc, 3)) return; // only near a piston
+        const key = `${Math.floor(loc.x)},${Math.floor(loc.y)},${Math.floor(loc.z)}`;
+        const count = (recentContainerDrops.get(key) || 0) + 1;
+        recentContainerDrops.set(key, count);
+        if (count === 1) {
+            // First copy is the legitimate one; keep it, and start the window.
+            system.runTimeout(() => recentContainerDrops.delete(key), 20);
+            return;
+        }
+        // Second+ identical container item at this spot near a piston = duped.
+        system.run(() => {
+            try { ent.remove(); } catch (e) {}
+            broadcastAlert(`§fA §cpiston ${stack.typeId.replace("minecraft:", "")} dupe§f was cleaned up at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+        });
+    } catch (e) {}
+});
+
+// --- NETHER PORTAL ITEM DUPE PROTECTION ---
+// Tossing a container as a dropped item into a nether portal and force-quitting
+// duplicates it: the item transfers to the nether while the force-quit rolls the
+// inventory back to still holding it. The force-quit is invisible to scripts, so
+// we deny the vector — a container item sitting in a nether portal is removed
+// before it can transfer, so the nether copy never exists. Container items are
+// essentially never tossed through portals in normal play (you carry them).
+function scanPortalItems() {
+    if (!getPortalProtectionSetting()) return;
+    for (const player of world.getPlayers()) {
+        const dimension = player.dimension;
+        let items;
+        try { items = dimension.getEntities({ type: "minecraft:item", location: player.location, maxDistance: 16 }); }
+        catch (e) { continue; }
+        for (const ent of items) {
+            try {
+                const stack = ent.getComponent("minecraft:item")?.itemStack;
+                if (!stack || !isPistonDupeContainer(stack.typeId)) continue;
+                const block = dimension.getBlock(ent.location);
+                if (!block || block.typeId !== "minecraft:portal") continue; // nether portal block
+                const loc = { x: ent.location.x, y: ent.location.y, z: ent.location.z };
+                const name = stack.typeId.replace("minecraft:", "");
+                ent.remove();
+                broadcastAlert(`§fA §c${name} nether-portal dupe§f was blocked at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+                recordDupeHistory(player.name, `Nether Portal Dupe: ${name}`, player.dimension.id);
+                for (const p of dimension.getPlayers({ location: loc, maxDistance: 16 })) {
+                    try { p.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
+                }
+            } catch (e) {}
+        }
+    }
+}
+
+system.runInterval(scanPortalItems, 5);

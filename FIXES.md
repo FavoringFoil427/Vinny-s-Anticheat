@@ -2,6 +2,173 @@
 
 Review of `scripts/main.js` (behavior pack, `@minecraft/server` 2.4.0).
 
+## Piston container dupe protection (new)
+
+Covers the "piston dupe" (a piston pushing a container block-entity duplicates
+it — a known Bedrock 1.21 glitch). Covered block-entities: **all shulker boxes,
+chests, trapped chests, and barrels**. The pack's existing shulker blocking only
+scanned hoppers/dispensers/droppers/crafters, so this path was uncovered.
+
+The glitch has **many geometric variants** — the container straight in front of
+the piston, a block (e.g. a lightning rod) pushed *into* the container, or the
+container offset by a block from the piston or the pushed block. Matching one
+shape is not enough (each offset becomes a bypass), so detection is two-layered:
+
+1. **Placement (`playerPlaceBlock`)** — the obvious "piston aimed straight at a
+   container" is caught the instant it's built, attributed to the placer
+   (`Piston Dupe: <container>`) and fed into the escalation system.
+2. **Continuous sweep** — every piston near a player is checked each scan. Reading
+   the piston's facing turned out to be unreliable across versions, so the sweep
+   uses **position, not direction**: a shulker touching the piston on any side
+   pops it (a shulker next to a piston is virtually never a legit build). It also
+   traces the push line as a bonus, so a container behind a pushed block (e.g. a
+   lightning rod) or a chest/barrel in the push path is caught. The sweep can't
+   reliably identify the builder, so it only removes + alerts; escalation comes
+   from the placement path.
+
+Why not the piston push itself: there is no cancellable piston event, and during
+a push Bedrock swaps the moving block to `minecraft:moving_block`, so
+`pistonActivate.getAttachedBlocks()` can't read the real type — that approach was
+removed as unreliable.
+
+Facing is read from the piston's block state, trying both the legacy integer
+`facing_direction` and the newer string `minecraft:facing_direction`. If a
+version won't expose either, the sweep falls back to popping a piston with a
+container directly adjacent, so protection never silently stops working. Both
+`minecraft:piston` and `minecraft:sticky_piston` are handled identically.
+
+Deliberately conservative: we only ever remove the **piston**, never the
+container or its contents — so a false positive costs at most one piston, never
+any items. Chests/barrels only trip the check when actually in a piston's push
+line (not mere adjacency), so normal chest-next-to-piston redstone is unaffected;
+shulkers are treated more aggressively (adjacency counts), since a shulker next
+to a piston is almost never legitimate. Toggle with `/cheats:piston` or in the
+panel (default on).
+
+### Duped-item cleanup (geometry-independent safety net)
+
+Because piston-facing can't be read reliably on every version, a second layer
+catches the dupe by its *result* instead of its setup: when a piston dupe fires
+it drops the extra container as an item entity. On `entitySpawn`, if two or more
+of the **same** container item appear at the same block position **next to a
+piston** within ~1 second, the extras are deleted (one is kept). It's scoped to
+piston-adjacent drops, so ordinary shulker drops from breaking/dropping are never
+touched, and it only removes the surplus copies — the player keeps the original.
+This is what actually "gets rid of the duped shulker" regardless of the setup
+geometry. (It catches dupes that drop items; a variant that duplicates a placed
+block instead would need separate handling.)
+
+## Admin-tag gate on the `/cheats:ui` panel (fixed)
+
+`/cheats:ui` was open to any **operator**, so an opped player without the `admin`
+tag could open the panel and change settings. It now requires the `admin` tag
+(like the log/whitelist commands); non-admin operators get "No permission."
+Also, `checkEscalation` now exempts `admin`-tagged players entirely, so an admin
+testing detections can never auto-flag or auto-kick themselves.
+
+## Nether portal item dupe protection (new)
+
+Covers the "throw a shulker into a nether portal, wait, force-quit, rejoin"
+dupe: the tossed item transfers to the nether while the force-quit rolls the
+inventory back to still holding it, leaving two copies. The force-quit can't be
+observed by a script, so the vector is denied instead — a **container item
+(shulker / chest / trapped chest / barrel) sitting in a nether portal block is
+removed** before it can transfer, so the nether copy never exists. A short scan
+(`minecraft:portal` block under `minecraft:item` entities near players) runs every
+5 ticks. Container items are essentially never tossed through portals in normal
+play (you carry them), so collateral is minimal. Toggle `/cheats:portal` or in
+the panel (default on). Scoped to containers; can be broadened to more item types
+if the dupe is seen abused with them.
+
+## Inventory Sync false positives on fast pickups (fixed)
+
+Players reported "tried to sync duplicated \<item\>" firing when they picked
+items up quickly during normal play. Two things combined to cause it:
+
+1. `savePlayerInventory` deliberately **delayed recording any inventory
+   increase by ~1 second** (a "pending" debounce). During that window the saved
+   baseline still held the *old, lower* counts.
+2. `runSpawnCheck` ran on **every** `playerSpawn` — including death-respawns,
+   not just rejoins — and deleted anything where the current count exceeded the
+   saved baseline.
+
+So a legit pickup that hadn't been committed yet (or any death-respawn shortly
+after gaining items) looked like surplus and got removed.
+
+**Fix:**
+- The snapshot is now written **immediately and undebounced** — the baseline
+  always matches the real online inventory, so freshly picked-up items are never
+  "unaccounted for." (Save interval relaxed from every 5 ticks to every 20,
+  since a once-per-second pre-disconnect snapshot is plenty and it cuts dynamic-
+  property writes.)
+- The dupe check now runs **only on an actual join/rejoin** (`initialSpawn`),
+  never on death-respawns or normal play. The inventory-sync exploit can only
+  add items while a player is *offline*, so rejoin is the only meaningful moment
+  to compare — which is exactly when the check now fires.
+
+Removed the now-unused `pendingUpdates` / `lastCommittedCounts` maps and their
+`playerLeave` cleanup.
+
+### Teleport / chunk-reload hardening
+
+Teleporting (e.g. via a TP mod) reloads the player entity and surrounding
+chunks; during that window the inventory can briefly read **empty or partial**.
+If that transient read were saved as the baseline, the player's real items would
+look like a surplus "dupe" and be removed. Guards added:
+
+- `savePlayerInventory` now refuses to overwrite a good snapshot with a
+  suspicious shrink — an empty read over a non-empty baseline, or a >50% drop,
+  is skipped. Rationale: a stale-but-**higher** baseline is safe (it can only
+  ever miss a dupe, never invent one); a too-**low** baseline is what fabricates
+  false positives. It also bails if the inventory component isn't available yet.
+- `runSpawnCheck` skips entirely when the saved baseline is empty/untrusted.
+
+## Admin-only alerts & auto-escalation (new)
+
+**Admin-only alerts.** `broadcastAlert` no longer always uses `world.sendMessage`.
+When the "Admin-Only Alerts" setting is on, alerts (including the coordinates
+they contain) are sent only to players with the `admin` tag, so exploiters and
+bystanders aren't tipped off. Toggle it in the panel or with `/cheats:alerts`.
+Defaults to off (public) to preserve the original behaviour.
+
+**Auto-escalation.** The `dupe_log` attempt counter now drives enforcement.
+Set a threshold (panel slider, or `/cheats:escalate <n>`, `0` = off). When a
+player's attempt count reaches the threshold they are tagged `cheats:flagged`
+and admins get a one-time ESCALATION notice; if "Kick at threshold" is enabled
+they are also kicked (via an operator-level `kick` command). The flag tag stops
+it re-firing on every later attempt, and clearing that player's log (or the
+whole log) removes the flag so they get a clean slate. Admins can select
+players tagged `cheats:flagged` for follow-up.
+
+## `/cheats:ui` control panel (new)
+
+Typing `/cheats:ui` now opens an on-screen form-based control panel (built on
+`@minecraft/server-ui`) that consolidates every existing control in one place:
+
+- **Protection Toggles** — a single screen with a switch for all six settings,
+  pre-filled with their current state; submit applies them all at once.
+- **Dupe Log** — browse logged players; select one to view their history.
+- **Player History** — look up any player by name.
+- **Clear Log** — clear everything (with a confirm prompt) or a single player.
+- **Whitelist** — view / add by ID / add item in hand / remove via dropdown.
+
+The panel opens at operator (`GameDirectors`) level, matching the toggle
+commands; the log/history/clear/whitelist sections only appear for players with
+the `admin` tag. The original text commands are all still registered and work
+unchanged — the UI is additive.
+
+**Two version-sensitive spots to verify in-game** (they depend on your exact
+Minecraft version and are the only things I can't test without the game):
+1. `manifest.json` declares `@minecraft/server-ui` version `2.1.0`. If the pack
+   fails to load with a module/dependency error, change this to the server-ui
+   version your Minecraft build ships (e.g. `2.0.0`) — match whatever your other
+   working script packs use.
+2. The form widgets use the newer options-object signature this build requires
+   (`.toggle(label, { defaultValue })`, `.dropdown(label, options,
+   { defaultValueIndex })`). `.textField(label, placeholder)` keeps its
+   positional placeholder. If you ever downgrade to an older Minecraft build
+   that rejects the options object, switch these back to positional values.
+
 ## Bugs / problems fixed in this pass
 
 ### 1. Ender chests were matched by the illegal-item container scanner
@@ -57,14 +224,17 @@ rejoin. See recommendation #4 for capping that persisted data.
 - **Nearby-container detection attributes items to the closest player.** The
   illegal-container and minecart-dupe alerts blame whichever non-admin player
   is within range, which can flag innocent bystanders.
-- **Inventory-sync detection is heuristic.** The baseline is committed on a
-  timer, so a legitimate item pickup shortly before a respawn can be flagged
-  and removed. It ships **disabled by default** (`getInventorySyncSetting()`
-  defaults to `false`) for this reason.
+- **Inventory-sync detection is heuristic.** It compares your inventory on
+  rejoin against the last snapshot taken while you were online and removes any
+  surplus. It ships **disabled by default** (`getInventorySyncSetting()`
+  defaults to `false`). See the fix below for the false-positive cause.
 
 ---
 
 ## Recommendations to add / improve
+
+> ✅ Admin-only alert routing and auto-escalation for repeat offenders are now
+> implemented — see the sections near the top of this file.
 
 1. **Move from polling to event-driven detection where possible.** The cube
    sweeps run every 10–20 ticks regardless of whether anything changed. Hooking
