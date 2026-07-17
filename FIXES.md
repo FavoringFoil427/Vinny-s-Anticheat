@@ -66,6 +66,20 @@ tag could open the panel and change settings. It now requires the `admin` tag
 Also, `checkEscalation` now exempts `admin`-tagged players entirely, so an admin
 testing detections can never auto-flag or auto-kick themselves.
 
+## Nether portal item dupe protection (new)
+
+Covers the "throw a shulker into a nether portal, wait, force-quit, rejoin"
+dupe: the tossed item transfers to the nether while the force-quit rolls the
+inventory back to still holding it, leaving two copies. The force-quit can't be
+observed by a script, so the vector is denied instead — a **container item
+(shulker / chest / trapped chest / barrel) sitting in a nether portal block is
+removed** before it can transfer, so the nether copy never exists. A short scan
+(`minecraft:portal` block under `minecraft:item` entities near players) runs every
+5 ticks. Container items are essentially never tossed through portals in normal
+play (you carry them), so collateral is minimal. Toggle `/cheats:portal` or in
+the panel (default on). Scoped to containers; can be broadened to more item types
+if the dupe is seen abused with them.
+
 ## Inventory Sync false positives on fast pickups (fixed)
 
 Players reported "tried to sync duplicated \<item\>" firing when they picked

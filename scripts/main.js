@@ -153,6 +153,7 @@ const BANNED_BLOCKS_PROPERTY = "cheats:bannedBlocks";
 const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
 const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
 const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
+const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
 const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
 const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
@@ -172,6 +173,8 @@ function getMinecartProtectionSetting() { return world.getDynamicProperty(MINECA
 function setMinecartProtectionSetting(v) { world.setDynamicProperty(MINECART_PROTECTION_PROPERTY, v); }
 function getPistonProtectionSetting() { return world.getDynamicProperty(PISTON_PROTECTION_PROPERTY) ?? true; }
 function setPistonProtectionSetting(v) { world.setDynamicProperty(PISTON_PROTECTION_PROPERTY, v); }
+function getPortalProtectionSetting() { return world.getDynamicProperty(PORTAL_PROTECTION_PROPERTY) ?? true; }
+function setPortalProtectionSetting(v) { world.setDynamicProperty(PORTAL_PROTECTION_PROPERTY, v); }
 function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
 function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
@@ -228,6 +231,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
                 msg += `  §f/cheats:piston §7- Toggle Piston Dupe Protection\n`;
+                msg += `  §f/cheats:portal §7- Toggle Nether Portal Dupe Protection\n`;
                 msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
                 msg += `  §f/cheats:escalate [n] §7- Set auto-flag/kick threshold (0=off)\n`;
                 msg += `\n§aInfo:§r\n`;
@@ -263,6 +267,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${getEscalationKick() ? "kick" : "flag"})` : "§cDISABLED"}§r\n`
                 );
@@ -337,6 +342,16 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getPistonProtectionSetting(); setPistonProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Piston Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:portal", description: "Toggle Nether Portal Dupe Protection", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getPortalProtectionSetting(); setPortalProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Nether Portal Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
             return { status: 0 };
         }
     );
@@ -553,6 +568,7 @@ async function openTogglesMenu(player) {
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
         .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() })
         .toggle("Piston Dupe Protection", { defaultValue: getPistonProtectionSetting() })
+        .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
         .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
         .toggle("Kick at threshold (off = flag only)", { defaultValue: getEscalationKick() });
@@ -566,9 +582,10 @@ async function openTogglesMenu(player) {
     setBedrockProtectionSetting(!!v[4]);
     setMinecartProtectionSetting(!!v[5]);
     setPistonProtectionSetting(!!v[6]);
-    setAdminOnlyAlerts(!!v[7]);
-    setEscalationThreshold(Math.max(0, Math.floor(v[8] ?? 0)));
-    setEscalationKick(!!v[9]);
+    setPortalProtectionSetting(!!v[7]);
+    setAdminOnlyAlerts(!!v[8]);
+    setEscalationThreshold(Math.max(0, Math.floor(v[9] ?? 0)));
+    setEscalationKick(!!v[10]);
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
@@ -1233,3 +1250,38 @@ world.afterEvents.entitySpawn.subscribe((event) => {
         });
     } catch (e) {}
 });
+
+// --- NETHER PORTAL ITEM DUPE PROTECTION ---
+// Tossing a container as a dropped item into a nether portal and force-quitting
+// duplicates it: the item transfers to the nether while the force-quit rolls the
+// inventory back to still holding it. The force-quit is invisible to scripts, so
+// we deny the vector — a container item sitting in a nether portal is removed
+// before it can transfer, so the nether copy never exists. Container items are
+// essentially never tossed through portals in normal play (you carry them).
+function scanPortalItems() {
+    if (!getPortalProtectionSetting()) return;
+    for (const player of world.getPlayers()) {
+        const dimension = player.dimension;
+        let items;
+        try { items = dimension.getEntities({ type: "minecraft:item", location: player.location, maxDistance: 16 }); }
+        catch (e) { continue; }
+        for (const ent of items) {
+            try {
+                const stack = ent.getComponent("minecraft:item")?.itemStack;
+                if (!stack || !isPistonDupeContainer(stack.typeId)) continue;
+                const block = dimension.getBlock(ent.location);
+                if (!block || block.typeId !== "minecraft:portal") continue; // nether portal block
+                const loc = { x: ent.location.x, y: ent.location.y, z: ent.location.z };
+                const name = stack.typeId.replace("minecraft:", "");
+                ent.remove();
+                broadcastAlert(`§fA §c${name} nether-portal dupe§f was blocked at ${Math.floor(loc.x)}, ${Math.floor(loc.z)}!`);
+                recordDupeHistory(player.name, `Nether Portal Dupe: ${name}`, player.dimension.id);
+                for (const p of dimension.getPlayers({ location: loc, maxDistance: 16 })) {
+                    try { p.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
+                }
+            } catch (e) {}
+        }
+    }
+}
+
+system.runInterval(scanPortalItems, 5);
