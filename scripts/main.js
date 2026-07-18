@@ -206,8 +206,10 @@ const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
 const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction"; // 0 = flag, 1 = kick, 2 = ban
 const BANNED_PLAYERS_PROPERTY = "cheats:bannedPlayers";
 const BAN_STRIKES_PROPERTY = "cheats:banStrikes";
-const BAN_DAYS_TIER1_PROPERTY = "cheats:banDaysTier1"; // 1st auto-ban duration (days)
-const BAN_DAYS_TIER2_PROPERTY = "cheats:banDaysTier2"; // 2nd auto-ban duration (days)
+const BAN_DAYS_TIER1_PROPERTY = "cheats:banDaysTier1"; // legacy 1st-tier (kept for migration)
+const BAN_DAYS_TIER2_PROPERTY = "cheats:banDaysTier2"; // legacy 2nd-tier (kept for migration)
+const BAN_TIERS_PROPERTY = "cheats:banTiers";          // array of per-offense durations (days; 0 = permanent)
+const MAX_BAN_TIERS = 10;
 const FLAGGED_TAG = "cheats:flagged";
 const DAY_MS = 86400000;
 
@@ -244,9 +246,29 @@ function setEscalationAction(v) { world.setDynamicProperty(ESCALATION_ACTION_PRO
 function escalationActionLabel(a) { return a === 2 ? "ban" : a === 1 ? "kick" : "flag"; }
 
 function getBanDaysTier1() { const v = world.getDynamicProperty(BAN_DAYS_TIER1_PROPERTY); return typeof v === "number" ? v : 1; }
-function setBanDaysTier1(v) { world.setDynamicProperty(BAN_DAYS_TIER1_PROPERTY, v); }
 function getBanDaysTier2() { const v = world.getDynamicProperty(BAN_DAYS_TIER2_PROPERTY); return typeof v === "number" ? v : 3; }
-function setBanDaysTier2(v) { world.setDynamicProperty(BAN_DAYS_TIER2_PROPERTY, v); }
+
+// Custom ban-tier list: index i = the ban length (days; 0 = permanent) for the
+// (i+1)-th auto-ban. The last tier also applies to every offense beyond it. Up to
+// MAX_BAN_TIERS tiers. Defaults to [1, 3, permanent], migrating any legacy tier
+// values the admin previously set.
+function normalizeTiers(arr) {
+    return arr.slice(0, MAX_BAN_TIERS).map((n) => Math.max(0, Math.floor(Number(n) || 0)));
+}
+function getBanTiers() {
+    try {
+        const raw = world.getDynamicProperty(BAN_TIERS_PROPERTY);
+        if (raw) { const a = JSON.parse(raw); if (Array.isArray(a) && a.length) return normalizeTiers(a); }
+    } catch (e) {}
+    return [getBanDaysTier1(), getBanDaysTier2(), 0]; // migrate / default
+}
+function saveBanTiers(arr) {
+    const n = normalizeTiers(arr);
+    try { world.setDynamicProperty(BAN_TIERS_PROPERTY, JSON.stringify(n.length ? n : [0])); } catch (e) {}
+}
+function banTiersSummary() {
+    return getBanTiers().map((d, i) => `${i + 1}:${d <= 0 ? "perm" : d + "d"}`).join(" ");
+}
 
 // --- BAN LIST (Bedrock has no native /ban, so we keep our own and kick on join) ---
 // Stored as { name: untilMs } where untilMs === 0 means permanent, otherwise an
@@ -288,11 +310,13 @@ function saveBanStrikes(map) { try { world.setDynamicProperty(BAN_STRIKES_PROPER
 function incrementBanStrike(name) { const m = getBanStrikes(); const c = (m[name] || 0) + 1; m[name] = c; saveBanStrikes(m); return c; }
 function resetBanStrike(name) { const m = getBanStrikes(); if (name in m) { delete m[name]; saveBanStrikes(m); } }
 
-// Compute the ban expiry + label for a given strike number.
+// Compute the ban expiry + label for a given strike number, using the custom
+// tier list. Strikes beyond the list clamp to the last configured tier.
 function banForStrike(strikes) {
-    if (strikes >= 3) return { until: 0, label: "permanent" };
-    const days = strikes === 2 ? getBanDaysTier2() : getBanDaysTier1();
-    if (days <= 0) return { until: 0, label: "permanent" };
+    const tiers = getBanTiers();
+    const idx = Math.min(Math.max(strikes, 1), tiers.length) - 1;
+    const days = tiers[idx];
+    if (!days || days <= 0) return { until: 0, label: "permanent" };
     return { until: Date.now() + days * DAY_MS, label: `${days} day${days !== 1 ? "s" : ""}` };
 }
 function formatRemaining(untilMs) {
@@ -425,7 +449,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}§r\n` +
                     (getEscalationThreshold() > 0 && getEscalationAction() === 2
-                        ? `  §7Ban tiers: 1st=${getBanDaysTier1() || "perm"}${getBanDaysTier1() ? "d" : ""}, 2nd=${getBanDaysTier2() || "perm"}${getBanDaysTier2() ? "d" : ""}, 3rd+=perm§r\n`
+                        ? `  §7Ban tiers (per offense): ${banTiersSummary()}§r\n`
                         : "")
                 );
             });
@@ -1036,8 +1060,7 @@ async function openBansMenu(player) {
         .title("Banned Players")
         .body(
             (names.length ? `${names.length} player(s) banned.` : "No players are banned.") +
-            `\n\n§7Auto-ban tiers: 1st = ${getBanDaysTier1() || "perm"}${getBanDaysTier1() ? "d" : ""}, ` +
-            `2nd = ${getBanDaysTier2() || "perm"}${getBanDaysTier2() ? "d" : ""}, 3rd+ = perm`
+            `\n\n§7Auto-ban tiers (per offense): ${banTiersSummary()}`
         )
         .button("View / Unban")
         .button("Ban a Player")
@@ -1081,20 +1104,55 @@ async function openBansMenu(player) {
             break;
         }
         case 2: {
-            const modal = new ModalFormData()
-                .title("Ban Durations")
-                .slider("1st offense (days, 0 = permanent)", 0, 60, { defaultValue: getBanDaysTier1() })
-                .slider("2nd offense (days, 0 = permanent)", 0, 60, { defaultValue: getBanDaysTier2() });
-            const m = await showForm(player, modal);
-            if (m && !m.canceled) {
-                setBanDaysTier1(Math.floor(m.formValues[0] ?? 1));
-                setBanDaysTier2(Math.floor(m.formValues[1] ?? 3));
-                player.sendMessage(`§e[Anticheat]§r Ban durations set — 1st: §f${getBanDaysTier1() || "permanent"}${getBanDaysTier1() ? "d" : ""}§r, 2nd: §f${getBanDaysTier2() || "permanent"}${getBanDaysTier2() ? "d" : ""}§r, 3rd+: §fpermanent§r.`);
-            }
-            break;
+            await openBanDurationsMenu(player);
+            return;
         }
         default:
             await openMainMenu(player);
+    }
+}
+
+// Editable list of per-offense ban lengths (up to MAX_BAN_TIERS). Tap a tier to
+// set its days, add a tier, or remove the last one.
+async function openBanDurationsMenu(player) {
+    const tiers = getBanTiers();
+    const form = new ActionFormData()
+        .title("Ban Durations")
+        .body("Ban length for each repeat offense. The last tier also applies to every further offense.\n\n" +
+            tiers.map((d, i) => `§eAttempt ${i + 1}:§r ${d <= 0 ? "permanent" : d + " day" + (d !== 1 ? "s" : "")}`).join("\n"));
+    const actions = [];
+    tiers.forEach((d, i) => {
+        form.button(`Edit Attempt ${i + 1}\n§7${d <= 0 ? "permanent" : d + "d"}`);
+        actions.push({ type: "edit", index: i });
+    });
+    if (tiers.length < MAX_BAN_TIERS) { form.button("§2+ Add attempt tier"); actions.push({ type: "add" }); }
+    if (tiers.length > 1) { form.button("§4- Remove last tier"); actions.push({ type: "remove" }); }
+    form.button("Back"); actions.push({ type: "back" });
+
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const a = actions[res.selection];
+    if (!a || a.type === "back") { await openBansMenu(player); return; }
+    if (a.type === "add") {
+        const t = getBanTiers(); if (t.length < MAX_BAN_TIERS) { t.push(0); saveBanTiers(t); }
+        await openBanDurationsMenu(player); return;
+    }
+    if (a.type === "remove") {
+        const t = getBanTiers(); if (t.length > 1) { t.pop(); saveBanTiers(t); }
+        await openBanDurationsMenu(player); return;
+    }
+    if (a.type === "edit") {
+        const cur = getBanTiers()[a.index] ?? 0;
+        const modal = new ModalFormData()
+            .title(`Attempt ${a.index + 1} ban length`)
+            .slider("Days (0 = permanent)", 0, 365, { defaultValue: cur });
+        const m = await showForm(player, modal);
+        if (m && !m.canceled) {
+            const t = getBanTiers();
+            t[a.index] = Math.floor(m.formValues[0] ?? 0);
+            saveBanTiers(t);
+        }
+        await openBanDurationsMenu(player); return;
     }
 }
 

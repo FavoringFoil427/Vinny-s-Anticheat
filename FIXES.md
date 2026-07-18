@@ -153,6 +153,17 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## Custom ban tiers, up to 10 offenses (new)
+
+The two fixed tiers were replaced by an **editable list of up to 10 per-offense
+ban lengths** (`cheats:banTiers`, days; 0 = permanent). The last tier also
+applies to every offense beyond it. Default `[1, 3, permanent]` (migrates any
+legacy tier values). In the panel, **Bans → Ban Durations** now lets you edit any
+tier's days, **add** a tier (up to 10), or **remove** the last one — so you can
+set, e.g., attempt 4 = 7 days, attempt 5 = 30 days, etc. `banForStrike` clamps
+strikes beyond the list to the last tier. `/cheats:status` and the Bans screen
+show the full tier summary.
+
 ## Escalating temp-bans with configurable durations (new)
 
 Auto-bans now escalate per repeat offense instead of always being permanent:
