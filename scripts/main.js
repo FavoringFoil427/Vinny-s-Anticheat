@@ -358,7 +358,9 @@ function checkAutoBan(player) {
     const strikes = incrementBanStrike(player.name);
     const { until, label } = banForStrike(strikes);
     addBan(player.name, until);
-    notifyAdmins(`§e${player.name}§f auto-banned §f(${label}, offense #${strikes}).`);
+    // Public announcement (visible even if the kick can't fire, e.g. the world
+    // owner on a single-player/LAN host, who cannot be kicked).
+    world.sendMessage(`§l§e[Anticheat] §r§c${player.name} §fhas been §c§lBANNED §r§ffor repeat duping §7(${label})§f. Told you not to do it again.`);
     kickPlayer(player, `Anticheat: banned (${label})`);
 }
 
