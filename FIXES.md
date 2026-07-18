@@ -153,6 +153,18 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## Simplified escalation: single Auto-ban toggle (new)
+
+The "Auto-flag threshold" slider and "Action at threshold" dropdown were removed
+from the panel — the ban tiers already encode the escalation. They're replaced by
+one toggle, **Auto-ban repeat dupers** (`cheats:autoBan`, also `/cheats:autoban`).
+When on, each confident dupe incident bans the player at their next ban tier (1st
+offense → tier 1, 2nd → tier 2, …); an `isBanned` guard stops one incident from
+skipping tiers. Inventory Sync is still excluded. The old flag/kick tiers and the
+attempt-threshold counter are gone; migration turns the toggle on if the previous
+config was threshold>0 with the Ban action. `/cheats:status` shows the toggle and,
+when on, the ban tiers.
+
 ## Custom ban tiers, up to 10 offenses (new)
 
 The two fixed tiers were replaced by an **editable list of up to 10 per-offense

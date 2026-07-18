@@ -48,9 +48,9 @@ function ensureDupeLogObjective() {
     }
 }
 
-// escalatable=false logs the attempt (visible in the dupe log) but never counts
-// toward or triggers auto-escalation — used for Inventory Sync, which has the
-// most false positives and shouldn't get anyone kicked or banned automatically.
+// escalatable=false logs the attempt (visible in the dupe log) but never triggers
+// an auto-ban — used for Inventory Sync, which has the most false positives and
+// shouldn't get anyone banned automatically.
 function recordDupeAttempt(player, escalatable = true) {
     try {
         ensureDupeLogObjective();
@@ -60,13 +60,7 @@ function recordDupeAttempt(player, escalatable = true) {
         try { current = objective.getScore(player.name) ?? 0; } catch (e) {}
         objective.setScore(player.name, current + 1);
         recordLastOffense(player);
-        if (escalatable) {
-            const counts = getEscCounts();
-            const escCount = (counts[player.name] || 0) + 1;
-            counts[player.name] = escCount;
-            saveEscCounts(counts);
-            try { checkEscalation(player, escCount); } catch (e) {}
-        }
+        if (escalatable) { try { checkAutoBan(player); } catch (e) {} }
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe attempt: ${e}`); }
 }
 
@@ -201,9 +195,10 @@ const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
 const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
 const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
-const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
-const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
-const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction"; // 0 = flag, 1 = kick, 2 = ban
+const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold"; // legacy (kept for migration)
+const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";           // legacy
+const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction";       // legacy (0 flag/1 kick/2 ban)
+const AUTO_BAN_PROPERTY = "cheats:autoBan";
 const BANNED_PLAYERS_PROPERTY = "cheats:bannedPlayers";
 const BAN_STRIKES_PROPERTY = "cheats:banStrikes";
 const BAN_DAYS_TIER1_PROPERTY = "cheats:banDaysTier1"; // legacy 1st-tier (kept for migration)
@@ -233,17 +228,16 @@ function getPortalProtectionSetting() { return world.getDynamicProperty(PORTAL_P
 function setPortalProtectionSetting(v) { world.setDynamicProperty(PORTAL_PROTECTION_PROPERTY, v); }
 function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
-function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
-function setEscalationThreshold(v) { world.setDynamicProperty(ESCALATION_THRESHOLD_PROPERTY, v); }
-// Escalation action: 0 = flag only, 1 = kick, 2 = ban. Migrates from the old
-// boolean kick setting if the new one was never set.
-function getEscalationAction() {
-    const v = world.getDynamicProperty(ESCALATION_ACTION_PROPERTY);
-    if (typeof v === "number") return v;
-    return (world.getDynamicProperty(ESCALATION_KICK_PROPERTY) ?? false) ? 1 : 0;
+// Auto-ban: when on, each confident dupe incident bans the player at the next
+// ban tier. Migrates from the old escalation settings (was it configured to ban?).
+function getAutoBanSetting() {
+    const v = world.getDynamicProperty(AUTO_BAN_PROPERTY);
+    if (typeof v === "boolean") return v;
+    const t = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY);
+    const a = world.getDynamicProperty(ESCALATION_ACTION_PROPERTY);
+    return typeof t === "number" && t > 0 && a === 2; // migrate: was configured to ban
 }
-function setEscalationAction(v) { world.setDynamicProperty(ESCALATION_ACTION_PROPERTY, v); }
-function escalationActionLabel(a) { return a === 2 ? "ban" : a === 1 ? "kick" : "flag"; }
+function setAutoBanSetting(v) { world.setDynamicProperty(AUTO_BAN_PROPERTY, v); }
 
 function getBanDaysTier1() { const v = world.getDynamicProperty(BAN_DAYS_TIER1_PROPERTY); return typeof v === "number" ? v : 1; }
 function getBanDaysTier2() { const v = world.getDynamicProperty(BAN_DAYS_TIER2_PROPERTY); return typeof v === "number" ? v : 3; }
@@ -335,30 +329,19 @@ function kickPlayer(player, reason) {
     catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
 }
 
-// Called after an attempt count is incremented. Once a player crosses the
-// configured threshold they are flagged (tag) and admins are notified once,
-// and depending on the action they are also kicked or banned. The flag tag
-// prevents this re-firing every later attempt until their log is cleared.
-function checkEscalation(player, newCount) {
+// Called on each confident dupe detection. When auto-ban is on, the player is
+// banned at their next ban tier (1st offense -> tier1, 2nd -> tier2, ...). The
+// isBanned guard stops the same incident from advancing several tiers at once;
+// the next tier applies after they serve/expire the current ban and reoffend.
+function checkAutoBan(player) {
+    if (!getAutoBanSetting()) return;
     if (player.hasTag("admin")) return; // never auto-punish admins (e.g. while testing)
-    const threshold = getEscalationThreshold();
-    if (threshold <= 0 || newCount < threshold) return;
-    if (player.hasTag(FLAGGED_TAG)) return;
-    try { player.addTag(FLAGGED_TAG); } catch (e) {}
-    const action = getEscalationAction();
-    if (action === 2) {
-        // Escalating temp-ban: 1st offense -> tier1 days, 2nd -> tier2 days, 3rd+ -> permanent.
-        const strikes = incrementBanStrike(player.name);
-        const { until, label } = banForStrike(strikes);
-        addBan(player.name, until);
-        notifyAdmins(`§e${player.name}§f reached §c${newCount}§f confident attempts — §cbanned §f(${label}, offense #${strikes}).`);
-        kickPlayer(player, `Anticheat: banned (${label})`);
-    } else if (action === 1) {
-        notifyAdmins(`§e${player.name}§f reached §c${newCount}§f confident attempts — §ckicking§f.`);
-        kickPlayer(player, "Anticheat: repeated dupe/exploit attempts");
-    } else {
-        notifyAdmins(`§e${player.name}§f reached §c${newCount}§f confident attempts — §eflagged§f.`);
-    }
+    if (isBanned(player.name)) return;   // already banned for this incident
+    const strikes = incrementBanStrike(player.name);
+    const { until, label } = banForStrike(strikes);
+    addBan(player.name, until);
+    notifyAdmins(`§e${player.name}§f auto-banned §f(${label}, offense #${strikes}).`);
+    kickPlayer(player, `Anticheat: banned (${label})`);
 }
 
 // Enforce bans: a banned player is kicked as soon as they finish joining; expired
@@ -406,7 +389,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:piston §7- Toggle Piston Dupe Protection\n`;
                 msg += `  §f/cheats:portal §7- Toggle Nether Portal Dupe Protection\n`;
                 msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
-                msg += `  §f/cheats:escalate [n] §7- Set auto-flag/kick threshold (0=off)\n`;
+                msg += `  §f/cheats:autoban §7- Toggle auto-banning repeat dupers\n`;
                 msg += `\n§aInfo:§r\n`;
                 msg += `  §f/cheats:ui §7- Open the control panel (operators)\n`;
                 msg += `  §f/cheats:status §7- View all toggle states\n`;
@@ -447,10 +430,8 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}§r\n` +
-                    (getEscalationThreshold() > 0 && getEscalationAction() === 2
-                        ? `  §7Ban tiers (per offense): ${banTiersSummary()}§r\n`
-                        : "")
+                    `  Auto-Ban Repeat Dupers: ${getAutoBanSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    (getAutoBanSetting() ? `  §7Ban tiers (per offense): ${banTiersSummary()}§r\n` : "")
                 );
             });
             return { status: 0 };
@@ -558,20 +539,14 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
-        { name: "cheats:escalate", description: "Set auto-escalation threshold (0 = off)", permissionLevel: CommandPermissionLevel.GameDirectors,
-          optionalParameters: [{ name: "threshold", type: CustomCommandParamType.Integer }] },
-        (origin, threshold) => {
+        { name: "cheats:autoban", description: "Toggle auto-banning repeat dupers (uses ban tiers)", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => {
-                if (threshold === undefined || threshold === null) {
-                    const t = getEscalationThreshold();
-                    player.sendMessage(`§e[Anticheat]§r Auto-escalation: ${t > 0 ? `§aAt ${t} attempts (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}`);
-                    return;
-                }
-                const t = Math.max(0, Math.floor(threshold));
-                setEscalationThreshold(t);
-                player.sendMessage(`§e[Anticheat]§r Auto-escalation threshold set to §a${t}§r${t === 0 ? " §7(disabled)" : ""}.`);
+                const v = !getAutoBanSetting();
+                setAutoBanSetting(v);
+                player.sendMessage(`§e[Anticheat]§r Auto-Ban Repeat Dupers: ${v ? `§aENABLED §7(tiers: ${banTiersSummary()})` : "§cDISABLED"}`);
             });
             return { status: 0 };
         }
@@ -884,8 +859,7 @@ async function openTogglesMenu(player) {
         .toggle("Piston Dupe Protection", { defaultValue: getPistonProtectionSetting() })
         .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
-        .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
-        .dropdown("Action at threshold", ["Flag only", "Kick", "Ban"], { defaultValueIndex: getEscalationAction() });
+        .toggle("Auto-ban repeat dupers (uses ban tiers)", { defaultValue: getAutoBanSetting() });
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
     const v = res.formValues;
@@ -899,8 +873,7 @@ async function openTogglesMenu(player) {
     setPistonProtectionSetting(!!v[7]);
     setPortalProtectionSetting(!!v[8]);
     setAdminOnlyAlerts(!!v[9]);
-    setEscalationThreshold(Math.max(0, Math.floor(v[10] ?? 0)));
-    setEscalationAction(Math.max(0, Math.min(2, v[11] ?? 0)));
+    setAutoBanSetting(!!v[10]);
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
