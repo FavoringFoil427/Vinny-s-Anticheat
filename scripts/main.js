@@ -98,6 +98,7 @@ function clearDupeLog() {
         saveLastOffenses({});
         saveEscCounts({});
         saveBanStrikes({});
+        saveWarned({});
     } catch (e) {}
 }
 
@@ -116,6 +117,7 @@ function clearDupeLogEntry(playerName) {
         try { const m = getLastOffenses(); delete m[playerName]; saveLastOffenses(m); } catch (e) {}
         try { const c = getEscCounts(); delete c[playerName]; saveEscCounts(c); } catch (e) {}
         resetBanStrike(playerName);
+        resetWarned(playerName);
         return existed;
     } catch (e) { return false; }
 }
@@ -199,6 +201,7 @@ const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold"; // legacy (k
 const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";           // legacy
 const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction";       // legacy (0 flag/1 kick/2 ban)
 const AUTO_BAN_PROPERTY = "cheats:autoBan";
+const WARNED_PROPERTY = "cheats:warned";
 const BANNED_PLAYERS_PROPERTY = "cheats:bannedPlayers";
 const BAN_STRIKES_PROPERTY = "cheats:banStrikes";
 const BAN_DAYS_TIER1_PROPERTY = "cheats:banDaysTier1"; // legacy 1st-tier (kept for migration)
@@ -329,14 +332,29 @@ function kickPlayer(player, reason) {
     catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
 }
 
-// Called on each confident dupe detection. When auto-ban is on, the player is
-// banned at their next ban tier (1st offense -> tier1, 2nd -> tier2, ...). The
-// isBanned guard stops the same incident from advancing several tiers at once;
-// the next tier applies after they serve/expire the current ban and reoffend.
+// Track which players have already had their one-time public warning.
+function getWarned() {
+    try { const raw = world.getDynamicProperty(WARNED_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveWarned(map) { try { world.setDynamicProperty(WARNED_PROPERTY, JSON.stringify(map)); } catch (e) {} }
+function isWarned(name) { return !!getWarned()[name]; }
+function markWarned(name) { const m = getWarned(); m[name] = true; saveWarned(m); }
+function resetWarned(name) { const m = getWarned(); if (name in m) { delete m[name]; saveWarned(m); } }
+
+// Called on each confident dupe detection. When auto-ban is on: the player's
+// FIRST offense is a one-time public warning (no ban); every offense after that
+// bans at their next ban tier (2nd -> tier1, 3rd -> tier2, ...). The isBanned
+// guard stops one incident from advancing several tiers at once.
 function checkAutoBan(player) {
     if (!getAutoBanSetting()) return;
     if (player.hasTag("admin")) return; // never auto-punish admins (e.g. while testing)
     if (isBanned(player.name)) return;   // already banned for this incident
+    if (!isWarned(player.name)) {
+        markWarned(player.name);
+        world.sendMessage(`§l§e[Anticheat] §r§f${player.name}, I see that you have tried to dupe. Do it again and see what happens.`);
+        return;
+    }
     const strikes = incrementBanStrike(player.name);
     const { until, label } = banForStrike(strikes);
     addBan(player.name, until);
@@ -1451,7 +1469,7 @@ world.afterEvents.entityRemove.subscribe((event) => {
         for (const player of world.getPlayers({ location: pos, maxDistance: 8 })) {
             if (player.hasTag("admin")) continue;
             broadcastAlert(`§e${player.name} §fmay be attempting a §cminecart chest dupe§f!`);
-            recordDupeAttempt(player);
+            recordDupeAttempt(player, false); // heuristic/"suspected": log only, never auto-ban
             recordDupeHistory(player.name, "Suspected Minecart Chest Dupe", player.dimension.id);
         }
     }

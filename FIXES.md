@@ -153,6 +153,17 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## First-offense warning + minecart excluded from auto-ban (new)
+
+- With auto-ban on, a player's **first** confident dupe is now a one-time public
+  warning broadcast to everyone ("<name>, I see that you have tried to dupe. Do it
+  again and see what happens.") instead of an immediate ban. Every offense after
+  that bans at the next tier (2nd → tier 1, 3rd → tier 2, …). The warned state
+  (`cheats:warned`) resets when the player's log is cleared.
+- The heuristic **"suspected minecart chest dupe"** detection is now log-only for
+  auto-ban (like Inventory Sync), since it's the most speculative check — it won't
+  warn or ban, only alert + log.
+
 ## Simplified escalation: single Auto-ban toggle (new)
 
 The "Auto-flag threshold" slider and "Action at threshold" dropdown were removed
