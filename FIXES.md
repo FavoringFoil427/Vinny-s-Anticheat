@@ -153,6 +153,24 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## Escalating temp-bans with configurable durations (new)
+
+Auto-bans now escalate per repeat offense instead of always being permanent:
+1st auto-ban = tier-1 days, 2nd = tier-2 days, 3rd+ = permanent (until an admin
+unbans). Defaults: **1 day / 3 days / permanent**. Both tier durations are
+adjustable in the panel (Bans → **Ban Durations**), so e.g. the 2nd offense can
+be set to 5 days.
+
+- Bans are now stored as `{ name: untilMs }` (0 = permanent, else an expiry
+  timestamp); the old array format migrates to permanent. Expired temp-bans are
+  lifted automatically on join and pruned when the ban list is viewed.
+- A per-player strike count (`cheats:banStrikes`) drives the tier; it resets when
+  that player's log is cleared (fresh slate), not on unban.
+- `/cheats:banlist` shows remaining time per player; the panel unban dropdown does
+  too. `/cheats:ban <player> [days]` supports an optional duration (permanent if
+  omitted); the panel "Ban a Player" has a days slider.
+- `/cheats:status` shows the ban tiers when the escalation action is Ban.
+
 ## Ban tier for auto-escalation (new)
 
 The escalation action is now three tiers instead of a kick on/off toggle:
