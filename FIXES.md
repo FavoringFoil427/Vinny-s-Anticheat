@@ -123,6 +123,15 @@ look like a surplus "dupe" and be removed. Guards added:
   false positives. It also bails if the inventory component isn't available yet.
 - `runSpawnCheck` skips entirely when the saved baseline is empty/untrusted.
 
+## Inventory Sync: item-removal toggle (new)
+
+Inventory Sync can now run in **alert-only** mode. A new toggle
+(`cheats:inventorySyncRemove`, default on) controls whether a detected sync dupe
+actually deletes the surplus items or just alerts + logs it. Off = detect and
+record but never remove items — safest given the feature's false-positive rate.
+Toggle in the panel ("Inv Sync: Remove Items"), via `/cheats:invremove`, and the
+mode is shown in `/cheats:status`.
+
 ## Inventory Sync excluded from auto-escalation (new)
 
 Inventory Sync is the least reliable detector, so it must never get a player

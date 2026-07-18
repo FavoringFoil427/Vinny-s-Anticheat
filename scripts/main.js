@@ -191,6 +191,7 @@ function notifyAdmins(message) {
 // --- SETTINGS ---
 const BUNDLE_BLOCK_PROPERTY = "cheats:blockBundles";
 const INVENTORY_SYNC_PROPERTY = "cheats:inventorySync";
+const INVENTORY_SYNC_REMOVE_PROPERTY = "cheats:inventorySyncRemove";
 const ILLEGAL_ITEMS_PROPERTY = "cheats:illegalItems";
 const BANNED_BLOCKS_PROPERTY = "cheats:bannedBlocks";
 const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
@@ -208,6 +209,8 @@ function getBundleBlockingSetting() { return world.getDynamicProperty(BUNDLE_BLO
 function setBundleBlockingSetting(v) { world.setDynamicProperty(BUNDLE_BLOCK_PROPERTY, v); }
 function getInventorySyncSetting() { return world.getDynamicProperty(INVENTORY_SYNC_PROPERTY) ?? false; }
 function setInventorySyncSetting(v) { world.setDynamicProperty(INVENTORY_SYNC_PROPERTY, v); }
+function getInventorySyncRemoveSetting() { return world.getDynamicProperty(INVENTORY_SYNC_REMOVE_PROPERTY) ?? true; }
+function setInventorySyncRemoveSetting(v) { world.setDynamicProperty(INVENTORY_SYNC_REMOVE_PROPERTY, v); }
 function getIllegalItemsSetting() { return world.getDynamicProperty(ILLEGAL_ITEMS_PROPERTY) ?? true; }
 function setIllegalItemsSetting(v) { world.setDynamicProperty(ILLEGAL_ITEMS_PROPERTY, v); }
 function getBannedBlocksSetting() { return world.getDynamicProperty(BANNED_BLOCKS_PROPERTY) ?? true; }
@@ -307,6 +310,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `\n§aToggles §7(requires operator):§r\n`;
                 msg += `  §f/cheats:bundles §7- Toggle Bundle/Shulker Box blocking\n`;
                 msg += `  §f/cheats:invcheck §7- Toggle Inventory Sync\n`;
+                msg += `  §f/cheats:invremove §7- Toggle Inv Sync item removal (off = alert only)\n`;
                 msg += `  §f/cheats:illegalitems §7- Toggle Illegal Item Detection\n`;
                 msg += `  §f/cheats:bannedblocks §7- Toggle Banned Block Detection\n`;
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
@@ -347,7 +351,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 player.sendMessage(
                     `§e[Anticheat] Status:§r\n` +
                     `  Bundle/Shulker Box Blocking: ${getBundleBlockingSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Inventory Sync: ${getInventorySyncSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Inventory Sync: ${getInventorySyncSetting() ? `§aENABLED §7(${getInventorySyncRemoveSetting() ? "removes items" : "alert only"})` : "§cDISABLED"}§r\n` +
                     `  Illegal Item Detection: ${getIllegalItemsSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Banned Block Detection: ${getBannedBlocksSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
@@ -378,6 +382,16 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getInventorySyncSetting(); setInventorySyncSetting(v); player.sendMessage(`§e[Anticheat]§r Inventory Sync: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:invremove", description: "Toggle whether Inventory Sync removes items (off = alert only)", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getInventorySyncRemoveSetting(); setInventorySyncRemoveSetting(v); player.sendMessage(`§e[Anticheat]§r Inv Sync Item Removal: ${v ? "§aENABLED" : "§calert only"}`); });
             return { status: 0 };
         }
     );
@@ -766,6 +780,7 @@ async function openTogglesMenu(player) {
         .title("Settings")
         .toggle("Bundle/Shulker Box Blocking", { defaultValue: getBundleBlockingSetting() })
         .toggle("Inventory Sync", { defaultValue: getInventorySyncSetting() })
+        .toggle("Inv Sync: Remove Items (off = alert only)", { defaultValue: getInventorySyncRemoveSetting() })
         .toggle("Illegal Item Detection", { defaultValue: getIllegalItemsSetting() })
         .toggle("Banned Block Detection", { defaultValue: getBannedBlocksSetting() })
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
@@ -780,15 +795,16 @@ async function openTogglesMenu(player) {
     const v = res.formValues;
     setBundleBlockingSetting(!!v[0]);
     setInventorySyncSetting(!!v[1]);
-    setIllegalItemsSetting(!!v[2]);
-    setBannedBlocksSetting(!!v[3]);
-    setBedrockProtectionSetting(!!v[4]);
-    setMinecartProtectionSetting(!!v[5]);
-    setPistonProtectionSetting(!!v[6]);
-    setPortalProtectionSetting(!!v[7]);
-    setAdminOnlyAlerts(!!v[8]);
-    setEscalationThreshold(Math.max(0, Math.floor(v[9] ?? 0)));
-    setEscalationAction(Math.max(0, Math.min(2, v[10] ?? 0)));
+    setInventorySyncRemoveSetting(!!v[2]);
+    setIllegalItemsSetting(!!v[3]);
+    setBannedBlocksSetting(!!v[4]);
+    setBedrockProtectionSetting(!!v[5]);
+    setMinecartProtectionSetting(!!v[6]);
+    setPistonProtectionSetting(!!v[7]);
+    setPortalProtectionSetting(!!v[8]);
+    setAdminOnlyAlerts(!!v[9]);
+    setEscalationThreshold(Math.max(0, Math.floor(v[10] ?? 0)));
+    setEscalationAction(Math.max(0, Math.min(2, v[11] ?? 0)));
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
@@ -1191,21 +1207,24 @@ function runSpawnCheck(player) {
             if (currentCount > savedCount) {
                 detectedDupe = true;
                 const itemName = typeId.replace("minecraft:", "");
-                broadcastAlert(`§e${player.name} §ftried to sync duplicated §7${itemName}§f! Items removed.`);
+                const removeItems = getInventorySyncRemoveSetting();
+                broadcastAlert(`§e${player.name} §ftried to sync duplicated §7${itemName}§f!${removeItems ? " Items removed." : ""}`);
                 recordDupeAttempt(player, false); // low-confidence: log only, never auto-punish
                 recordDupeHistory(player.name, `Inventory Sync Exploit (${itemName} x${currentCount - savedCount})`, player.dimension.id);
-                let toRemove = currentCount - savedCount;
-                for (let i = 0; i < container.size; i++) {
-                    if (toRemove <= 0) break;
-                    const item = container.getItem(i);
-                    if (item?.typeId === typeId) {
-                        if (item.amount > toRemove) {
-                            item.amount -= toRemove;
-                            container.setItem(i, item);
-                            toRemove = 0;
-                        } else {
-                            toRemove -= item.amount;
-                            container.setItem(i);
+                if (removeItems) {
+                    let toRemove = currentCount - savedCount;
+                    for (let i = 0; i < container.size; i++) {
+                        if (toRemove <= 0) break;
+                        const item = container.getItem(i);
+                        if (item?.typeId === typeId) {
+                            if (item.amount > toRemove) {
+                                item.amount -= toRemove;
+                                container.setItem(i, item);
+                                toRemove = 0;
+                            } else {
+                                toRemove -= item.amount;
+                                container.setItem(i);
+                            }
                         }
                     }
                 }
