@@ -361,7 +361,10 @@ function checkAutoBan(player) {
     // Public announcement (visible even if the kick can't fire, e.g. the world
     // owner on a single-player/LAN host, who cannot be kicked).
     world.sendMessage(`§l§e[Anticheat] §r§c${player.name} §fhas been §c§lBANNED §r§ffor repeat duping §7(${label})§f. Told you not to do it again.`);
-    kickPlayer(player, `Anticheat: banned (${label})`);
+    // Delay the kick a moment so any item removals made by this same detection
+    // are persisted to the player's data first — otherwise they can rejoin still
+    // holding the item and be banned again immediately.
+    system.runTimeout(() => { try { kickPlayer(player, `Anticheat: banned (${label})`); } catch (e) {} }, 20);
 }
 
 // Enforce bans: a banned player is kicked as soon as they finish joining; expired
@@ -1395,30 +1398,69 @@ world.afterEvents.playerSpawn.subscribe((event) => {
 });
 
 // --- ILLEGAL ITEMS: PLAYER INVENTORY SCAN ---
-function scanPlayerForIllegalItems(player) {
-    if (!getIllegalItemsSetting()) return;
-    if (player.hasTag("admin")) return;
+// Players who just joined are skipped briefly so the join purge below can clean
+// leftovers before the live scan could punish them for those same items.
+const illegalJoinGrace = new Set();
+
+// Strip every illegal item from a player's inventory in a single pass and return
+// the names removed. Always sweep the WHOLE inventory before any punishment:
+// punishing mid-sweep can kick the player while illegal items remain in later
+// slots, which then re-trigger (and re-ban) them the moment they rejoin.
+function purgeIllegalItems(player) {
+    const removed = [];
     try {
         const container = player.getComponent("inventory")?.container;
-        if (!container) return;
+        if (!container) return removed;
         for (let i = 0; i < container.size; i++) {
             const item = container.getItem(i);
             if (isIllegalItem(item)) {
                 container.setItem(i, undefined);
-                const itemName = item.typeId.replace("minecraft:", "");
-                broadcastAlert(`§e${player.name} §fhad an illegal item removed: §c${itemName}§f!`);
-                recordDupeAttempt(player);
-                recordDupeHistory(player.name, `Illegal Item: ${itemName}`, player.dimension.id);
-                player.playSound("note.bass", { pitch: 0.5, volume: 1 });
+                removed.push(item.typeId.replace("minecraft:", ""));
             }
         }
     } catch (e) {}
+    return removed;
+}
+
+function scanPlayerForIllegalItems(player) {
+    if (!getIllegalItemsSetting()) return;
+    if (player.hasTag("admin")) return;
+    if (illegalJoinGrace.has(player.name)) return;
+    const removed = purgeIllegalItems(player);
+    if (removed.length === 0) return;
+    const list = removed.join(", ");
+    broadcastAlert(`§e${player.name} §fhad illegal item(s) removed: §c${list}§f!`);
+    recordDupeHistory(player.name, `Illegal Item: ${list}`, player.dimension.id);
+    try { player.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
+    recordDupeAttempt(player); // last: this may ban/kick, and the sweep is done
 }
 
 system.runInterval(() => {
     if (!getIllegalItemsSetting()) return;
     for (const player of world.getPlayers()) scanPlayerForIllegalItems(player);
 }, 20);
+
+// On join, silently purge illegal items left over from a previous session (e.g.
+// items that survived a kick before the removal was saved). This is deliberately
+// NOT counted as an offense: otherwise a leftover item would re-ban the player
+// the instant their ban expired, trapping them in a ban loop forever. Admins are
+// still notified, and anything obtained after joining is punished normally.
+world.afterEvents.playerSpawn.subscribe((event) => {
+    if (!event.initialSpawn) return;
+    if (!getIllegalItemsSetting()) return;
+    const player = event.player;
+    if (player.hasTag("admin")) return;
+    illegalJoinGrace.add(player.name);
+    system.run(() => {
+        try {
+            const removed = purgeIllegalItems(player);
+            if (removed.length) {
+                notifyAdmins(`§e${player.name}§f joined with illegal item(s) — removed, no ban: §c${removed.join(", ")}§f.`);
+            }
+        } catch (e) {}
+    });
+    system.runTimeout(() => illegalJoinGrace.delete(player.name), 60);
+});
 
 // --- BANNED BLOCK PLACEMENT ---
 const BANNED_BLOCKS = new Set([

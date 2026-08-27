@@ -153,6 +153,28 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## Ban loop from leftover illegal items (fixed)
+
+A player banned for an illegal item (e.g. spawn eggs) could be re-banned the
+instant their ban expired, because the item was still in their inventory on
+rejoin — an inescapable loop. Two causes, both fixed:
+
+1. **Punishing mid-sweep.** `scanPlayerForIllegalItems` removed one slot, then
+   immediately recorded the attempt — which could ban and kick the player *inside*
+   the loop, leaving illegal items in every later slot untouched. The sweep is now
+   split: `purgeIllegalItems` strips the whole inventory in one pass, and the
+   attempt is recorded once afterwards, so the inventory is always fully clean
+   before any punishment fires.
+2. **Kick/save race.** The kick ran in the same tick as the item removal, so the
+   removal could fail to persist to the player's saved data. The auto-ban kick is
+   now delayed ~1s so inventory writes land first.
+
+As a belt-and-braces guarantee, illegal items are also **silently purged on join**
+(with an admin notice, but deliberately *not* counted as an offense) and a short
+join grace stops the live scan from punishing those same leftovers. That
+definitively breaks the loop: a returning player always starts clean, while
+anything they obtain after joining is punished normally.
+
 ## First-offense warning + minecart excluded from auto-ban (new)
 
 - With auto-ban on, a player's **first** confident dupe is now a one-time public
