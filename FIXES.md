@@ -153,6 +153,28 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## Player freeze (new)
+
+Admins can freeze a player in place for questioning: `/cheats:freeze <player>`,
+`/cheats:unfreeze <player>`, `/cheats:frozen` to list, plus a **Freeze Players**
+screen in `/cheats:ui` (freeze/unfreeze by dropdown).
+
+A frozen player cannot move, cannot turn their head/camera, and cannot use items,
+break/place blocks, or interact with anything — item use is blocked specifically
+so an ender pearl or chorus fruit can't break the freeze.
+
+Built on the stable input-permission API (`InputPermissionCategory.Movement` and
+`Camera` via `player.inputPermissions.setPermissionCategory`), which is cleaner
+than per-tick teleporting. A position anchor still runs every 10 ticks as backup:
+if something external (knockback, pistons, flowing water) shifts them more than a
+block, they're pulled back. An action-bar reminder shows while frozen.
+
+Frozen state persists across rejoins (`cheats:frozen`) and is re-applied on join.
+Because input permissions can persist on a player, any player who is *not* on the
+frozen list has movement/camera explicitly re-enabled on join — so nobody can end
+up permanently stuck if the pack is reloaded or removed mid-freeze. Admins cannot
+be frozen.
+
 ## Ban loop from leftover illegal items (fixed)
 
 A player banned for an illegal item (e.g. spawn eggs) could be re-banned the
