@@ -123,6 +123,15 @@ look like a surplus "dupe" and be removed. Guards added:
   false positives. It also bails if the inventory component isn't available yet.
 - `runSpawnCheck` skips entirely when the saved baseline is empty/untrusted.
 
+## Inventory Sync: item-removal toggle (new)
+
+Inventory Sync can now run in **alert-only** mode. A new toggle
+(`cheats:inventorySyncRemove`, default on) controls whether a detected sync dupe
+actually deletes the surplus items or just alerts + logs it. Off = detect and
+record but never remove items — safest given the feature's false-positive rate.
+Toggle in the panel ("Inv Sync: Remove Items"), via `/cheats:invremove`, and the
+mode is shown in `/cheats:status`.
+
 ## Inventory Sync excluded from auto-escalation (new)
 
 Inventory Sync is the least reliable detector, so it must never get a player
@@ -143,6 +152,80 @@ escalation counter is cleared alongside the log.
   player's location (`cheats:lastOffense`). `/cheats:tp <player>` warps an admin
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
+
+## Ban loop from leftover illegal items (fixed)
+
+A player banned for an illegal item (e.g. spawn eggs) could be re-banned the
+instant their ban expired, because the item was still in their inventory on
+rejoin — an inescapable loop. Two causes, both fixed:
+
+1. **Punishing mid-sweep.** `scanPlayerForIllegalItems` removed one slot, then
+   immediately recorded the attempt — which could ban and kick the player *inside*
+   the loop, leaving illegal items in every later slot untouched. The sweep is now
+   split: `purgeIllegalItems` strips the whole inventory in one pass, and the
+   attempt is recorded once afterwards, so the inventory is always fully clean
+   before any punishment fires.
+2. **Kick/save race.** The kick ran in the same tick as the item removal, so the
+   removal could fail to persist to the player's saved data. The auto-ban kick is
+   now delayed ~1s so inventory writes land first.
+
+As a belt-and-braces guarantee, illegal items are also **silently purged on join**
+(with an admin notice, but deliberately *not* counted as an offense) and a short
+join grace stops the live scan from punishing those same leftovers. That
+definitively breaks the loop: a returning player always starts clean, while
+anything they obtain after joining is punished normally.
+
+## First-offense warning + minecart excluded from auto-ban (new)
+
+- With auto-ban on, a player's **first** confident dupe is now a one-time public
+  warning broadcast to everyone ("<name>, I see that you have tried to dupe. Do it
+  again and see what happens.") instead of an immediate ban. Every offense after
+  that bans at the next tier (2nd → tier 1, 3rd → tier 2, …). The warned state
+  (`cheats:warned`) resets when the player's log is cleared.
+- The heuristic **"suspected minecart chest dupe"** detection is now log-only for
+  auto-ban (like Inventory Sync), since it's the most speculative check — it won't
+  warn or ban, only alert + log.
+
+## Simplified escalation: single Auto-ban toggle (new)
+
+The "Auto-flag threshold" slider and "Action at threshold" dropdown were removed
+from the panel — the ban tiers already encode the escalation. They're replaced by
+one toggle, **Auto-ban repeat dupers** (`cheats:autoBan`, also `/cheats:autoban`).
+When on, each confident dupe incident bans the player at their next ban tier (1st
+offense → tier 1, 2nd → tier 2, …); an `isBanned` guard stops one incident from
+skipping tiers. Inventory Sync is still excluded. The old flag/kick tiers and the
+attempt-threshold counter are gone; migration turns the toggle on if the previous
+config was threshold>0 with the Ban action. `/cheats:status` shows the toggle and,
+when on, the ban tiers.
+
+## Custom ban tiers, up to 10 offenses (new)
+
+The two fixed tiers were replaced by an **editable list of up to 10 per-offense
+ban lengths** (`cheats:banTiers`, days; 0 = permanent). The last tier also
+applies to every offense beyond it. Default `[1, 3, permanent]` (migrates any
+legacy tier values). In the panel, **Bans → Ban Durations** now lets you edit any
+tier's days, **add** a tier (up to 10), or **remove** the last one — so you can
+set, e.g., attempt 4 = 7 days, attempt 5 = 30 days, etc. `banForStrike` clamps
+strikes beyond the list to the last tier. `/cheats:status` and the Bans screen
+show the full tier summary.
+
+## Escalating temp-bans with configurable durations (new)
+
+Auto-bans now escalate per repeat offense instead of always being permanent:
+1st auto-ban = tier-1 days, 2nd = tier-2 days, 3rd+ = permanent (until an admin
+unbans). Defaults: **1 day / 3 days / permanent**. Both tier durations are
+adjustable in the panel (Bans → **Ban Durations**), so e.g. the 2nd offense can
+be set to 5 days.
+
+- Bans are now stored as `{ name: untilMs }` (0 = permanent, else an expiry
+  timestamp); the old array format migrates to permanent. Expired temp-bans are
+  lifted automatically on join and pruned when the ban list is viewed.
+- A per-player strike count (`cheats:banStrikes`) drives the tier; it resets when
+  that player's log is cleared (fresh slate), not on unban.
+- `/cheats:banlist` shows remaining time per player; the panel unban dropdown does
+  too. `/cheats:ban <player> [days]` supports an optional duration (permanent if
+  omitted); the panel "Ban a Player" has a days slider.
+- `/cheats:status` shows the ban tiers when the escalation action is Ban.
 
 ## Ban tier for auto-escalation (new)
 

@@ -48,9 +48,9 @@ function ensureDupeLogObjective() {
     }
 }
 
-// escalatable=false logs the attempt (visible in the dupe log) but never counts
-// toward or triggers auto-escalation — used for Inventory Sync, which has the
-// most false positives and shouldn't get anyone kicked or banned automatically.
+// escalatable=false logs the attempt (visible in the dupe log) but never triggers
+// an auto-ban — used for Inventory Sync, which has the most false positives and
+// shouldn't get anyone banned automatically.
 function recordDupeAttempt(player, escalatable = true) {
     try {
         ensureDupeLogObjective();
@@ -60,13 +60,7 @@ function recordDupeAttempt(player, escalatable = true) {
         try { current = objective.getScore(player.name) ?? 0; } catch (e) {}
         objective.setScore(player.name, current + 1);
         recordLastOffense(player);
-        if (escalatable) {
-            const counts = getEscCounts();
-            const escCount = (counts[player.name] || 0) + 1;
-            counts[player.name] = escCount;
-            saveEscCounts(counts);
-            try { checkEscalation(player, escCount); } catch (e) {}
-        }
+        if (escalatable) { try { checkAutoBan(player); } catch (e) {} }
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe attempt: ${e}`); }
 }
 
@@ -103,6 +97,8 @@ function clearDupeLog() {
         for (const pl of world.getPlayers()) { try { pl.removeTag(FLAGGED_TAG); } catch (e) {} }
         saveLastOffenses({});
         saveEscCounts({});
+        saveBanStrikes({});
+        saveWarned({});
     } catch (e) {}
 }
 
@@ -120,6 +116,8 @@ function clearDupeLogEntry(playerName) {
         removeFlag(playerName);
         try { const m = getLastOffenses(); delete m[playerName]; saveLastOffenses(m); } catch (e) {}
         try { const c = getEscCounts(); delete c[playerName]; saveEscCounts(c); } catch (e) {}
+        resetBanStrike(playerName);
+        resetWarned(playerName);
         return existed;
     } catch (e) { return false; }
 }
@@ -191,6 +189,7 @@ function notifyAdmins(message) {
 // --- SETTINGS ---
 const BUNDLE_BLOCK_PROPERTY = "cheats:blockBundles";
 const INVENTORY_SYNC_PROPERTY = "cheats:inventorySync";
+const INVENTORY_SYNC_REMOVE_PROPERTY = "cheats:inventorySyncRemove";
 const ILLEGAL_ITEMS_PROPERTY = "cheats:illegalItems";
 const BANNED_BLOCKS_PROPERTY = "cheats:bannedBlocks";
 const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
@@ -198,16 +197,26 @@ const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
 const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
 const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
-const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold";
-const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";
-const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction"; // 0 = flag, 1 = kick, 2 = ban
+const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold"; // legacy (kept for migration)
+const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";           // legacy
+const ESCALATION_ACTION_PROPERTY = "cheats:escalationAction";       // legacy (0 flag/1 kick/2 ban)
+const AUTO_BAN_PROPERTY = "cheats:autoBan";
+const WARNED_PROPERTY = "cheats:warned";
 const BANNED_PLAYERS_PROPERTY = "cheats:bannedPlayers";
+const BAN_STRIKES_PROPERTY = "cheats:banStrikes";
+const BAN_DAYS_TIER1_PROPERTY = "cheats:banDaysTier1"; // legacy 1st-tier (kept for migration)
+const BAN_DAYS_TIER2_PROPERTY = "cheats:banDaysTier2"; // legacy 2nd-tier (kept for migration)
+const BAN_TIERS_PROPERTY = "cheats:banTiers";          // array of per-offense durations (days; 0 = permanent)
+const MAX_BAN_TIERS = 10;
 const FLAGGED_TAG = "cheats:flagged";
+const DAY_MS = 86400000;
 
 function getBundleBlockingSetting() { return world.getDynamicProperty(BUNDLE_BLOCK_PROPERTY) ?? true; }
 function setBundleBlockingSetting(v) { world.setDynamicProperty(BUNDLE_BLOCK_PROPERTY, v); }
 function getInventorySyncSetting() { return world.getDynamicProperty(INVENTORY_SYNC_PROPERTY) ?? false; }
 function setInventorySyncSetting(v) { world.setDynamicProperty(INVENTORY_SYNC_PROPERTY, v); }
+function getInventorySyncRemoveSetting() { return world.getDynamicProperty(INVENTORY_SYNC_REMOVE_PROPERTY) ?? true; }
+function setInventorySyncRemoveSetting(v) { world.setDynamicProperty(INVENTORY_SYNC_REMOVE_PROPERTY, v); }
 function getIllegalItemsSetting() { return world.getDynamicProperty(ILLEGAL_ITEMS_PROPERTY) ?? true; }
 function setIllegalItemsSetting(v) { world.setDynamicProperty(ILLEGAL_ITEMS_PROPERTY, v); }
 function getBannedBlocksSetting() { return world.getDynamicProperty(BANNED_BLOCKS_PROPERTY) ?? true; }
@@ -222,29 +231,100 @@ function getPortalProtectionSetting() { return world.getDynamicProperty(PORTAL_P
 function setPortalProtectionSetting(v) { world.setDynamicProperty(PORTAL_PROTECTION_PROPERTY, v); }
 function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
-function getEscalationThreshold() { const v = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY); return typeof v === "number" ? v : 0; }
-function setEscalationThreshold(v) { world.setDynamicProperty(ESCALATION_THRESHOLD_PROPERTY, v); }
-// Escalation action: 0 = flag only, 1 = kick, 2 = ban. Migrates from the old
-// boolean kick setting if the new one was never set.
-function getEscalationAction() {
-    const v = world.getDynamicProperty(ESCALATION_ACTION_PROPERTY);
-    if (typeof v === "number") return v;
-    return (world.getDynamicProperty(ESCALATION_KICK_PROPERTY) ?? false) ? 1 : 0;
+// Auto-ban: when on, each confident dupe incident bans the player at the next
+// ban tier. Migrates from the old escalation settings (was it configured to ban?).
+function getAutoBanSetting() {
+    const v = world.getDynamicProperty(AUTO_BAN_PROPERTY);
+    if (typeof v === "boolean") return v;
+    const t = world.getDynamicProperty(ESCALATION_THRESHOLD_PROPERTY);
+    const a = world.getDynamicProperty(ESCALATION_ACTION_PROPERTY);
+    return typeof t === "number" && t > 0 && a === 2; // migrate: was configured to ban
 }
-function setEscalationAction(v) { world.setDynamicProperty(ESCALATION_ACTION_PROPERTY, v); }
-function escalationActionLabel(a) { return a === 2 ? "ban" : a === 1 ? "kick" : "flag"; }
+function setAutoBanSetting(v) { world.setDynamicProperty(AUTO_BAN_PROPERTY, v); }
+
+function getBanDaysTier1() { const v = world.getDynamicProperty(BAN_DAYS_TIER1_PROPERTY); return typeof v === "number" ? v : 1; }
+function getBanDaysTier2() { const v = world.getDynamicProperty(BAN_DAYS_TIER2_PROPERTY); return typeof v === "number" ? v : 3; }
+
+// Custom ban-tier list: index i = the ban length (days; 0 = permanent) for the
+// (i+1)-th auto-ban. The last tier also applies to every offense beyond it. Up to
+// MAX_BAN_TIERS tiers. Defaults to [1, 3, permanent], migrating any legacy tier
+// values the admin previously set.
+function normalizeTiers(arr) {
+    return arr.slice(0, MAX_BAN_TIERS).map((n) => Math.max(0, Math.floor(Number(n) || 0)));
+}
+function getBanTiers() {
+    try {
+        const raw = world.getDynamicProperty(BAN_TIERS_PROPERTY);
+        if (raw) { const a = JSON.parse(raw); if (Array.isArray(a) && a.length) return normalizeTiers(a); }
+    } catch (e) {}
+    return [getBanDaysTier1(), getBanDaysTier2(), 0]; // migrate / default
+}
+function saveBanTiers(arr) {
+    const n = normalizeTiers(arr);
+    try { world.setDynamicProperty(BAN_TIERS_PROPERTY, JSON.stringify(n.length ? n : [0])); } catch (e) {}
+}
+function banTiersSummary() {
+    return getBanTiers().map((d, i) => `${i + 1}:${d <= 0 ? "perm" : d + "d"}`).join(" ");
+}
 
 // --- BAN LIST (Bedrock has no native /ban, so we keep our own and kick on join) ---
-function getBanList() {
-    try { const raw = world.getDynamicProperty(BANNED_PLAYERS_PROPERTY); return raw ? JSON.parse(raw) : []; }
-    catch (e) { return []; }
+// Stored as { name: untilMs } where untilMs === 0 means permanent, otherwise an
+// expiry timestamp. Migrates the old array format (all permanent).
+function getBans() {
+    try {
+        const raw = world.getDynamicProperty(BANNED_PLAYERS_PROPERTY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) { const o = {}; for (const n of parsed) o[n] = 0; return o; }
+        return parsed;
+    } catch (e) { return {}; }
 }
-function saveBanList(list) {
-    try { world.setDynamicProperty(BANNED_PLAYERS_PROPERTY, JSON.stringify(list)); } catch (e) {}
+function saveBans(obj) {
+    try { world.setDynamicProperty(BANNED_PLAYERS_PROPERTY, JSON.stringify(obj)); } catch (e) {}
 }
-function isBanned(name) { return getBanList().includes(name); }
-function addBan(name) { const l = getBanList(); if (!l.includes(name)) { l.push(name); saveBanList(l); } }
-function removeBan(name) { const l = getBanList(); const i = l.indexOf(name); if (i !== -1) { l.splice(i, 1); saveBanList(l); return true; } return false; }
+// Drop expired temp bans; returns the live map.
+function pruneExpiredBans() {
+    const bans = getBans();
+    let changed = false;
+    const now = Date.now();
+    for (const name in bans) {
+        const u = bans[name];
+        if (u !== 0 && now >= u) { delete bans[name]; changed = true; }
+    }
+    if (changed) saveBans(bans);
+    return bans;
+}
+function isBanned(name) { const u = getBans()[name]; return u !== undefined && (u === 0 || Date.now() < u); }
+function addBan(name, untilMs) { const b = getBans(); b[name] = untilMs; saveBans(b); }
+function removeBan(name) { const b = getBans(); if (name in b) { delete b[name]; saveBans(b); return true; } return false; }
+
+// Per-player count of how many times they've been auto-banned (drives the tier).
+function getBanStrikes() {
+    try { const raw = world.getDynamicProperty(BAN_STRIKES_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveBanStrikes(map) { try { world.setDynamicProperty(BAN_STRIKES_PROPERTY, JSON.stringify(map)); } catch (e) {} }
+function incrementBanStrike(name) { const m = getBanStrikes(); const c = (m[name] || 0) + 1; m[name] = c; saveBanStrikes(m); return c; }
+function resetBanStrike(name) { const m = getBanStrikes(); if (name in m) { delete m[name]; saveBanStrikes(m); } }
+
+// Compute the ban expiry + label for a given strike number, using the custom
+// tier list. Strikes beyond the list clamp to the last configured tier.
+function banForStrike(strikes) {
+    const tiers = getBanTiers();
+    const idx = Math.min(Math.max(strikes, 1), tiers.length) - 1;
+    const days = tiers[idx];
+    if (!days || days <= 0) return { until: 0, label: "permanent" };
+    return { until: Date.now() + days * DAY_MS, label: `${days} day${days !== 1 ? "s" : ""}` };
+}
+function formatRemaining(untilMs) {
+    if (untilMs === 0) return "permanent";
+    const ms = untilMs - Date.now();
+    if (ms <= 0) return "expired";
+    const d = Math.floor(ms / DAY_MS), h = Math.floor((ms % DAY_MS) / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+}
 
 function kickPlayer(player, reason) {
     const cmd = `kick "${player.name}" ${reason}`;
@@ -252,35 +332,52 @@ function kickPlayer(player, reason) {
     catch (e) { try { player.runCommand(cmd); } catch (e2) {} }
 }
 
-// Called after an attempt count is incremented. Once a player crosses the
-// configured threshold they are flagged (tag) and admins are notified once,
-// and depending on the action they are also kicked or banned. The flag tag
-// prevents this re-firing every later attempt until their log is cleared.
-function checkEscalation(player, newCount) {
+// Track which players have already had their one-time public warning.
+function getWarned() {
+    try { const raw = world.getDynamicProperty(WARNED_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveWarned(map) { try { world.setDynamicProperty(WARNED_PROPERTY, JSON.stringify(map)); } catch (e) {} }
+function isWarned(name) { return !!getWarned()[name]; }
+function markWarned(name) { const m = getWarned(); m[name] = true; saveWarned(m); }
+function resetWarned(name) { const m = getWarned(); if (name in m) { delete m[name]; saveWarned(m); } }
+
+// Called on each confident dupe detection. When auto-ban is on: the player's
+// FIRST offense is a one-time public warning (no ban); every offense after that
+// bans at their next ban tier (2nd -> tier1, 3rd -> tier2, ...). The isBanned
+// guard stops one incident from advancing several tiers at once.
+function checkAutoBan(player) {
+    if (!getAutoBanSetting()) return;
     if (player.hasTag("admin")) return; // never auto-punish admins (e.g. while testing)
-    const threshold = getEscalationThreshold();
-    if (threshold <= 0 || newCount < threshold) return;
-    if (player.hasTag(FLAGGED_TAG)) return;
-    try { player.addTag(FLAGGED_TAG); } catch (e) {}
-    const action = getEscalationAction();
-    const verb = action === 2 ? "§cbanning" : action === 1 ? "§ckicking" : "§eflagged";
-    notifyAdmins(`§e${player.name}§f reached §c${newCount}§f attempts — ${verb}§f.`);
-    if (action === 2) {
-        addBan(player.name);
-        kickPlayer(player, "Anticheat: banned for repeated dupe/exploit attempts");
-    } else if (action === 1) {
-        kickPlayer(player, "Anticheat: repeated dupe/exploit attempts");
+    if (isBanned(player.name)) return;   // already banned for this incident
+    if (!isWarned(player.name)) {
+        markWarned(player.name);
+        world.sendMessage(`§l§e[Anticheat] §r§f${player.name}, I see that you have tried to dupe. Do it again and see what happens.`);
+        return;
     }
+    const strikes = incrementBanStrike(player.name);
+    const { until, label } = banForStrike(strikes);
+    addBan(player.name, until);
+    // Public announcement (visible even if the kick can't fire, e.g. the world
+    // owner on a single-player/LAN host, who cannot be kicked).
+    world.sendMessage(`§l§e[Anticheat] §r§c${player.name} §fhas been §c§lBANNED §r§ffor repeat duping §7(${label})§f. Told you not to do it again.`);
+    // Delay the kick a moment so any item removals made by this same detection
+    // are persisted to the player's data first — otherwise they can rejoin still
+    // holding the item and be banned again immediately.
+    system.runTimeout(() => { try { kickPlayer(player, `Anticheat: banned (${label})`); } catch (e) {} }, 20);
 }
 
-// Enforce bans: a banned player is kicked as soon as they finish joining.
+// Enforce bans: a banned player is kicked as soon as they finish joining; expired
+// temp bans are lifted automatically.
 world.afterEvents.playerSpawn.subscribe((event) => {
     if (!event.initialSpawn) return;
     const player = event.player;
     if (player.hasTag("admin")) return; // safety: never lock an admin out
-    if (isBanned(player.name)) {
-        system.runTimeout(() => { try { kickPlayer(player, "Anticheat: you are banned from this world"); } catch (e) {} }, 20);
-    }
+    const until = getBans()[player.name];
+    if (until === undefined) return;
+    if (until !== 0 && Date.now() >= until) { removeBan(player.name); return; }
+    const remaining = formatRemaining(until);
+    system.runTimeout(() => { try { kickPlayer(player, `Anticheat: you are banned (${remaining} remaining)`); } catch (e) {} }, 20);
 });
 
 // Remove the escalation flag from a player (by name) if they are online, so
@@ -307,6 +404,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `\n§aToggles §7(requires operator):§r\n`;
                 msg += `  §f/cheats:bundles §7- Toggle Bundle/Shulker Box blocking\n`;
                 msg += `  §f/cheats:invcheck §7- Toggle Inventory Sync\n`;
+                msg += `  §f/cheats:invremove §7- Toggle Inv Sync item removal (off = alert only)\n`;
                 msg += `  §f/cheats:illegalitems §7- Toggle Illegal Item Detection\n`;
                 msg += `  §f/cheats:bannedblocks §7- Toggle Banned Block Detection\n`;
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
@@ -314,7 +412,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:piston §7- Toggle Piston Dupe Protection\n`;
                 msg += `  §f/cheats:portal §7- Toggle Nether Portal Dupe Protection\n`;
                 msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
-                msg += `  §f/cheats:escalate [n] §7- Set auto-flag/kick threshold (0=off)\n`;
+                msg += `  §f/cheats:autoban §7- Toggle auto-banning repeat dupers\n`;
                 msg += `\n§aInfo:§r\n`;
                 msg += `  §f/cheats:ui §7- Open the control panel (operators)\n`;
                 msg += `  §f/cheats:status §7- View all toggle states\n`;
@@ -327,7 +425,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     msg += `  §f/cheats:tp <player> §7- Teleport to a player's last offense\n`;
                     msg += `  §f/cheats:clearlog [player] §7- Clear the dupe log\n`;
                     msg += `  §f/cheats:banlist §7- View banned players\n`;
-                    msg += `  §f/cheats:ban <player> §7- Ban a player\n`;
+                    msg += `  §f/cheats:ban <player> [days] §7- Ban a player (perm if no days)\n`;
                     msg += `  §f/cheats:unban <player> §7- Unban a player\n`;
                     msg += `  §f/cheats:whitelist <add/remove/list> [item] §7- Manage whitelist\n`;
                     msg += `  §f/cheats:whitelisthand §7- Whitelist item in hand\n`;
@@ -347,7 +445,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 player.sendMessage(
                     `§e[Anticheat] Status:§r\n` +
                     `  Bundle/Shulker Box Blocking: ${getBundleBlockingSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Inventory Sync: ${getInventorySyncSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  Inventory Sync: ${getInventorySyncSetting() ? `§aENABLED §7(${getInventorySyncRemoveSetting() ? "removes items" : "alert only"})` : "§cDISABLED"}§r\n` +
                     `  Illegal Item Detection: ${getIllegalItemsSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Banned Block Detection: ${getBannedBlocksSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
@@ -355,7 +453,8 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  Auto-Escalation: ${getEscalationThreshold() > 0 ? `§aAt ${getEscalationThreshold()} (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}§r\n`
+                    `  Auto-Ban Repeat Dupers: ${getAutoBanSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    (getAutoBanSetting() ? `  §7Ban tiers (per offense): ${banTiersSummary()}§r\n` : "")
                 );
             });
             return { status: 0 };
@@ -378,6 +477,16 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getInventorySyncSetting(); setInventorySyncSetting(v); player.sendMessage(`§e[Anticheat]§r Inventory Sync: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:invremove", description: "Toggle whether Inventory Sync removes items (off = alert only)", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getInventorySyncRemoveSetting(); setInventorySyncRemoveSetting(v); player.sendMessage(`§e[Anticheat]§r Inv Sync Item Removal: ${v ? "§aENABLED" : "§calert only"}`); });
             return { status: 0 };
         }
     );
@@ -453,20 +562,14 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
-        { name: "cheats:escalate", description: "Set auto-escalation threshold (0 = off)", permissionLevel: CommandPermissionLevel.GameDirectors,
-          optionalParameters: [{ name: "threshold", type: CustomCommandParamType.Integer }] },
-        (origin, threshold) => {
+        { name: "cheats:autoban", description: "Toggle auto-banning repeat dupers (uses ban tiers)", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => {
-                if (threshold === undefined || threshold === null) {
-                    const t = getEscalationThreshold();
-                    player.sendMessage(`§e[Anticheat]§r Auto-escalation: ${t > 0 ? `§aAt ${t} attempts (${escalationActionLabel(getEscalationAction())})` : "§cDISABLED"}`);
-                    return;
-                }
-                const t = Math.max(0, Math.floor(threshold));
-                setEscalationThreshold(t);
-                player.sendMessage(`§e[Anticheat]§r Auto-escalation threshold set to §a${t}§r${t === 0 ? " §7(disabled)" : ""}.`);
+                const v = !getAutoBanSetting();
+                setAutoBanSetting(v);
+                player.sendMessage(`§e[Anticheat]§r Auto-Ban Repeat Dupers: ${v ? `§aENABLED §7(tiers: ${banTiersSummary()})` : "§cDISABLED"}`);
             });
             return { status: 0 };
         }
@@ -541,10 +644,11 @@ system.beforeEvents.startup.subscribe((init) => {
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => {
                 if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
-                const list = getBanList();
-                if (list.length === 0) { player.sendMessage(`§e[Anticheat]§r No players are banned.`); return; }
-                let msg = `§e[Anticheat] §lBanned Players§r §7(${list.length})§r\n`;
-                for (const n of list) msg += `  §c${n}\n`;
+                const bans = pruneExpiredBans();
+                const names = Object.keys(bans);
+                if (names.length === 0) { player.sendMessage(`§e[Anticheat]§r No players are banned.`); return; }
+                let msg = `§e[Anticheat] §lBanned Players§r §7(${names.length})§r\n`;
+                for (const n of names) msg += `  §c${n}§r — §f${formatRemaining(bans[n])}§r\n`;
                 msg += `\n§7Use /cheats:unban <name> to lift a ban.`;
                 player.sendMessage(msg);
             });
@@ -553,9 +657,10 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
-        { name: "cheats:ban", description: "Ban a player (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
-          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
-        (origin, playerName) => {
+        { name: "cheats:ban", description: "Ban a player, optionally for N days (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }],
+          optionalParameters: [{ name: "days", type: CustomCommandParamType.Integer }] },
+        (origin, playerName, days) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => {
@@ -565,9 +670,12 @@ system.beforeEvents.startup.subscribe((init) => {
                 let target = null;
                 for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
                 if (target && target.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c You cannot ban an admin.`); return; }
-                addBan(name);
-                if (target) kickPlayer(target, "Anticheat: you are banned from this world");
-                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned§r${target ? " and kicked" : " (will be kicked on join)"}.`);
+                const d = (typeof days === "number" && days > 0) ? Math.floor(days) : 0;
+                const until = d > 0 ? Date.now() + d * DAY_MS : 0;
+                const label = d > 0 ? `${d} day${d !== 1 ? "s" : ""}` : "permanent";
+                addBan(name, until);
+                if (target) kickPlayer(target, `Anticheat: you are banned (${label})`);
+                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned §f(${label})§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             });
             return { status: 0 };
         }
@@ -766,6 +874,7 @@ async function openTogglesMenu(player) {
         .title("Settings")
         .toggle("Bundle/Shulker Box Blocking", { defaultValue: getBundleBlockingSetting() })
         .toggle("Inventory Sync", { defaultValue: getInventorySyncSetting() })
+        .toggle("Inv Sync: Remove Items (off = alert only)", { defaultValue: getInventorySyncRemoveSetting() })
         .toggle("Illegal Item Detection", { defaultValue: getIllegalItemsSetting() })
         .toggle("Banned Block Detection", { defaultValue: getBannedBlocksSetting() })
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
@@ -773,22 +882,21 @@ async function openTogglesMenu(player) {
         .toggle("Piston Dupe Protection", { defaultValue: getPistonProtectionSetting() })
         .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
-        .slider("Auto-flag threshold (0 = off)", 0, 25, { defaultValue: getEscalationThreshold() })
-        .dropdown("Action at threshold", ["Flag only", "Kick", "Ban"], { defaultValueIndex: getEscalationAction() });
+        .toggle("Auto-ban repeat dupers (uses ban tiers)", { defaultValue: getAutoBanSetting() });
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
     const v = res.formValues;
     setBundleBlockingSetting(!!v[0]);
     setInventorySyncSetting(!!v[1]);
-    setIllegalItemsSetting(!!v[2]);
-    setBannedBlocksSetting(!!v[3]);
-    setBedrockProtectionSetting(!!v[4]);
-    setMinecartProtectionSetting(!!v[5]);
-    setPistonProtectionSetting(!!v[6]);
-    setPortalProtectionSetting(!!v[7]);
-    setAdminOnlyAlerts(!!v[8]);
-    setEscalationThreshold(Math.max(0, Math.floor(v[9] ?? 0)));
-    setEscalationAction(Math.max(0, Math.min(2, v[10] ?? 0)));
+    setInventorySyncRemoveSetting(!!v[2]);
+    setIllegalItemsSetting(!!v[3]);
+    setBannedBlocksSetting(!!v[4]);
+    setBedrockProtectionSetting(!!v[5]);
+    setMinecartProtectionSetting(!!v[6]);
+    setPistonProtectionSetting(!!v[7]);
+    setPortalProtectionSetting(!!v[8]);
+    setAdminOnlyAlerts(!!v[9]);
+    setAutoBanSetting(!!v[10]);
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
@@ -942,30 +1050,39 @@ async function openWhitelistMenu(player) {
 }
 
 async function openBansMenu(player) {
-    const list = getBanList();
+    const bans = pruneExpiredBans();
+    const names = Object.keys(bans);
     const form = new ActionFormData()
         .title("Banned Players")
-        .body(list.length ? `${list.length} player(s) banned.` : "No players are banned.")
+        .body(
+            (names.length ? `${names.length} player(s) banned.` : "No players are banned.") +
+            `\n\n§7Auto-ban tiers (per offense): ${banTiersSummary()}`
+        )
         .button("View / Unban")
         .button("Ban a Player")
+        .button("Ban Durations")
         .button("Back");
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
     switch (res.selection) {
         case 0: {
-            if (list.length === 0) { player.sendMessage("§e[Anticheat]§r No players are banned."); break; }
+            if (names.length === 0) { player.sendMessage("§e[Anticheat]§r No players are banned."); break; }
+            const labels = names.map((n) => `${n} §7(${formatRemaining(bans[n])})`);
             const modal = new ModalFormData()
                 .title("Unban Player")
-                .dropdown("Select player to unban", list, { defaultValueIndex: 0 });
+                .dropdown("Select player to unban", labels, { defaultValueIndex: 0 });
             const m = await showForm(player, modal);
             if (m && !m.canceled) {
-                const name = list[m.formValues[0]];
+                const name = names[m.formValues[0]];
                 if (name && removeBan(name)) player.sendMessage(`§e[Anticheat]§r §a${name}§r has been §aunbanned§r.`);
             }
             break;
         }
         case 1: {
-            const modal = new ModalFormData().title("Ban a Player").textField("Player name", "Exact name");
+            const modal = new ModalFormData()
+                .title("Ban a Player")
+                .textField("Player name", "Exact name")
+                .slider("Days (0 = permanent)", 0, 60, { defaultValue: 0 });
             const m = await showForm(player, modal);
             if (m && !m.canceled) {
                 const name = (m.formValues[0] || "").trim();
@@ -973,14 +1090,65 @@ async function openBansMenu(player) {
                 let target = null;
                 for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
                 if (target && target.hasTag("admin")) { player.sendMessage("§e[Anticheat]§c You cannot ban an admin."); break; }
-                addBan(name);
-                if (target) kickPlayer(target, "Anticheat: you are banned from this world");
-                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned§r${target ? " and kicked" : " (will be kicked on join)"}.`);
+                const d = Math.floor(m.formValues[1] ?? 0);
+                const until = d > 0 ? Date.now() + d * DAY_MS : 0;
+                const label = d > 0 ? `${d} day${d !== 1 ? "s" : ""}` : "permanent";
+                addBan(name, until);
+                if (target) kickPlayer(target, `Anticheat: you are banned (${label})`);
+                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned §f(${label})§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             }
             break;
         }
+        case 2: {
+            await openBanDurationsMenu(player);
+            return;
+        }
         default:
             await openMainMenu(player);
+    }
+}
+
+// Editable list of per-offense ban lengths (up to MAX_BAN_TIERS). Tap a tier to
+// set its days, add a tier, or remove the last one.
+async function openBanDurationsMenu(player) {
+    const tiers = getBanTiers();
+    const form = new ActionFormData()
+        .title("Ban Durations")
+        .body("Ban length for each repeat offense. The last tier also applies to every further offense.\n\n" +
+            tiers.map((d, i) => `§eAttempt ${i + 1}:§r ${d <= 0 ? "permanent" : d + " day" + (d !== 1 ? "s" : "")}`).join("\n"));
+    const actions = [];
+    tiers.forEach((d, i) => {
+        form.button(`Edit Attempt ${i + 1}\n§7${d <= 0 ? "permanent" : d + "d"}`);
+        actions.push({ type: "edit", index: i });
+    });
+    if (tiers.length < MAX_BAN_TIERS) { form.button("§2+ Add attempt tier"); actions.push({ type: "add" }); }
+    if (tiers.length > 1) { form.button("§4- Remove last tier"); actions.push({ type: "remove" }); }
+    form.button("Back"); actions.push({ type: "back" });
+
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    const a = actions[res.selection];
+    if (!a || a.type === "back") { await openBansMenu(player); return; }
+    if (a.type === "add") {
+        const t = getBanTiers(); if (t.length < MAX_BAN_TIERS) { t.push(0); saveBanTiers(t); }
+        await openBanDurationsMenu(player); return;
+    }
+    if (a.type === "remove") {
+        const t = getBanTiers(); if (t.length > 1) { t.pop(); saveBanTiers(t); }
+        await openBanDurationsMenu(player); return;
+    }
+    if (a.type === "edit") {
+        const cur = getBanTiers()[a.index] ?? 0;
+        const modal = new ModalFormData()
+            .title(`Attempt ${a.index + 1} ban length`)
+            .slider("Days (0 = permanent)", 0, 365, { defaultValue: cur });
+        const m = await showForm(player, modal);
+        if (m && !m.canceled) {
+            const t = getBanTiers();
+            t[a.index] = Math.floor(m.formValues[0] ?? 0);
+            saveBanTiers(t);
+        }
+        await openBanDurationsMenu(player); return;
     }
 }
 
@@ -1191,21 +1359,24 @@ function runSpawnCheck(player) {
             if (currentCount > savedCount) {
                 detectedDupe = true;
                 const itemName = typeId.replace("minecraft:", "");
-                broadcastAlert(`§e${player.name} §ftried to sync duplicated §7${itemName}§f! Items removed.`);
+                const removeItems = getInventorySyncRemoveSetting();
+                broadcastAlert(`§e${player.name} §ftried to sync duplicated §7${itemName}§f!${removeItems ? " Items removed." : ""}`);
                 recordDupeAttempt(player, false); // low-confidence: log only, never auto-punish
                 recordDupeHistory(player.name, `Inventory Sync Exploit (${itemName} x${currentCount - savedCount})`, player.dimension.id);
-                let toRemove = currentCount - savedCount;
-                for (let i = 0; i < container.size; i++) {
-                    if (toRemove <= 0) break;
-                    const item = container.getItem(i);
-                    if (item?.typeId === typeId) {
-                        if (item.amount > toRemove) {
-                            item.amount -= toRemove;
-                            container.setItem(i, item);
-                            toRemove = 0;
-                        } else {
-                            toRemove -= item.amount;
-                            container.setItem(i);
+                if (removeItems) {
+                    let toRemove = currentCount - savedCount;
+                    for (let i = 0; i < container.size; i++) {
+                        if (toRemove <= 0) break;
+                        const item = container.getItem(i);
+                        if (item?.typeId === typeId) {
+                            if (item.amount > toRemove) {
+                                item.amount -= toRemove;
+                                container.setItem(i, item);
+                                toRemove = 0;
+                            } else {
+                                toRemove -= item.amount;
+                                container.setItem(i);
+                            }
                         }
                     }
                 }
@@ -1227,30 +1398,69 @@ world.afterEvents.playerSpawn.subscribe((event) => {
 });
 
 // --- ILLEGAL ITEMS: PLAYER INVENTORY SCAN ---
-function scanPlayerForIllegalItems(player) {
-    if (!getIllegalItemsSetting()) return;
-    if (player.hasTag("admin")) return;
+// Players who just joined are skipped briefly so the join purge below can clean
+// leftovers before the live scan could punish them for those same items.
+const illegalJoinGrace = new Set();
+
+// Strip every illegal item from a player's inventory in a single pass and return
+// the names removed. Always sweep the WHOLE inventory before any punishment:
+// punishing mid-sweep can kick the player while illegal items remain in later
+// slots, which then re-trigger (and re-ban) them the moment they rejoin.
+function purgeIllegalItems(player) {
+    const removed = [];
     try {
         const container = player.getComponent("inventory")?.container;
-        if (!container) return;
+        if (!container) return removed;
         for (let i = 0; i < container.size; i++) {
             const item = container.getItem(i);
             if (isIllegalItem(item)) {
                 container.setItem(i, undefined);
-                const itemName = item.typeId.replace("minecraft:", "");
-                broadcastAlert(`§e${player.name} §fhad an illegal item removed: §c${itemName}§f!`);
-                recordDupeAttempt(player);
-                recordDupeHistory(player.name, `Illegal Item: ${itemName}`, player.dimension.id);
-                player.playSound("note.bass", { pitch: 0.5, volume: 1 });
+                removed.push(item.typeId.replace("minecraft:", ""));
             }
         }
     } catch (e) {}
+    return removed;
+}
+
+function scanPlayerForIllegalItems(player) {
+    if (!getIllegalItemsSetting()) return;
+    if (player.hasTag("admin")) return;
+    if (illegalJoinGrace.has(player.name)) return;
+    const removed = purgeIllegalItems(player);
+    if (removed.length === 0) return;
+    const list = removed.join(", ");
+    broadcastAlert(`§e${player.name} §fhad illegal item(s) removed: §c${list}§f!`);
+    recordDupeHistory(player.name, `Illegal Item: ${list}`, player.dimension.id);
+    try { player.playSound("note.bass", { pitch: 0.5, volume: 1 }); } catch (e) {}
+    recordDupeAttempt(player); // last: this may ban/kick, and the sweep is done
 }
 
 system.runInterval(() => {
     if (!getIllegalItemsSetting()) return;
     for (const player of world.getPlayers()) scanPlayerForIllegalItems(player);
 }, 20);
+
+// On join, silently purge illegal items left over from a previous session (e.g.
+// items that survived a kick before the removal was saved). This is deliberately
+// NOT counted as an offense: otherwise a leftover item would re-ban the player
+// the instant their ban expired, trapping them in a ban loop forever. Admins are
+// still notified, and anything obtained after joining is punished normally.
+world.afterEvents.playerSpawn.subscribe((event) => {
+    if (!event.initialSpawn) return;
+    if (!getIllegalItemsSetting()) return;
+    const player = event.player;
+    if (player.hasTag("admin")) return;
+    illegalJoinGrace.add(player.name);
+    system.run(() => {
+        try {
+            const removed = purgeIllegalItems(player);
+            if (removed.length) {
+                notifyAdmins(`§e${player.name}§f joined with illegal item(s) — removed, no ban: §c${removed.join(", ")}§f.`);
+            }
+        } catch (e) {}
+    });
+    system.runTimeout(() => illegalJoinGrace.delete(player.name), 60);
+});
 
 // --- BANNED BLOCK PLACEMENT ---
 const BANNED_BLOCKS = new Set([
@@ -1303,7 +1513,7 @@ world.afterEvents.entityRemove.subscribe((event) => {
         for (const player of world.getPlayers({ location: pos, maxDistance: 8 })) {
             if (player.hasTag("admin")) continue;
             broadcastAlert(`§e${player.name} §fmay be attempting a §cminecart chest dupe§f!`);
-            recordDupeAttempt(player);
+            recordDupeAttempt(player, false); // heuristic/"suspected": log only, never auto-ban
             recordDupeHistory(player.name, "Suspected Minecart Chest Dupe", player.dimension.id);
         }
     }
