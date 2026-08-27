@@ -1,4 +1,4 @@
-import { world, system, CommandPermissionLevel, CustomCommandParamType, ItemStack } from "@minecraft/server";
+import { world, system, CommandPermissionLevel, CustomCommandParamType, ItemStack, InputPermissionCategory } from "@minecraft/server";
 import { ActionFormData, ModalFormData, MessageFormData, FormCancelationReason } from "@minecraft/server-ui";
 
 console.warn("[Vinny's Anticheat] Script loading...");
@@ -423,6 +423,9 @@ system.beforeEvents.startup.subscribe((init) => {
                     msg += `  §f/cheats:viewlog §7- View the dupe log\n`;
                     msg += `  §f/cheats:history <player> §7- View a player's history\n`;
                     msg += `  §f/cheats:tp <player> §7- Teleport to a player's last offense\n`;
+                    msg += `  §f/cheats:freeze <player> §7- Freeze a player in place\n`;
+                    msg += `  §f/cheats:unfreeze <player> §7- Unfreeze a player\n`;
+                    msg += `  §f/cheats:frozen §7- List frozen players\n`;
                     msg += `  §f/cheats:clearlog [player] §7- Clear the dupe log\n`;
                     msg += `  §f/cheats:banlist §7- View banned players\n`;
                     msg += `  §f/cheats:ban <player> [days] §7- Ban a player (perm if no days)\n`;
@@ -632,6 +635,63 @@ system.beforeEvents.startup.subscribe((init) => {
                     clearDupeHistoryAll();
                     player.sendMessage(`§e[Anticheat]§r Dupe log §acleared§r.`);
                 }
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:freeze", description: "Freeze a player in place (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                if (!name) { player.sendMessage(`§e[Anticheat]§c Please specify a player name.`); return; }
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (!target) { player.sendMessage(`§e[Anticheat]§c Player §f${name}§c not found (must be online).`); return; }
+                if (target.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c You cannot freeze an admin.`); return; }
+                if (isFrozen(name)) { player.sendMessage(`§e[Anticheat]§r §f${name}§r is already frozen.`); return; }
+                freezePlayer(target);
+                player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cfrozen§r.`);
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:unfreeze", description: "Unfreeze a player (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                if (!name) { player.sendMessage(`§e[Anticheat]§c Please specify a player name.`); return; }
+                if (unfreezePlayer(name)) player.sendMessage(`§e[Anticheat]§r §a${name}§r has been §aunfrozen§r.`);
+                else player.sendMessage(`§e[Anticheat]§r §f${name}§r is not frozen.`);
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:frozen", description: "List frozen players (requires admin tag)", permissionLevel: CommandPermissionLevel.Any },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const list = getFrozen();
+                if (list.length === 0) { player.sendMessage(`§e[Anticheat]§r No players are frozen.`); return; }
+                let msg = `§e[Anticheat] §lFrozen Players§r §7(${list.length})§r\n`;
+                for (const n of list) msg += `  §c${n}\n`;
+                msg += `\n§7Use /cheats:unfreeze <name> to release.`;
+                player.sendMessage(msg);
             });
             return { status: 0 };
         }
@@ -862,6 +922,7 @@ async function openMainMenu(player) {
         form.button("Clear Log");       actions.push(openClearLogMenu);
         form.button("Whitelist");       actions.push(openWhitelistMenu);
         form.button("Bans");            actions.push(openBansMenu);
+        form.button("Freeze Players");  actions.push(openFreezeMenu);
     }
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
@@ -1151,6 +1212,158 @@ async function openBanDurationsMenu(player) {
         await openBanDurationsMenu(player); return;
     }
 }
+
+async function openFreezeMenu(player) {
+    const frozen = getFrozen();
+    const online = world.getPlayers().filter((p) => !p.hasTag("admin")).map((p) => p.name);
+    const form = new ActionFormData()
+        .title("Freeze Players")
+        .body(frozen.length ? `Frozen: §c${frozen.join(", ")}` : "No players are frozen.")
+        .button("Freeze a Player")
+        .button("Unfreeze a Player")
+        .button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    switch (res.selection) {
+        case 0: {
+            const targets = online.filter((n) => !frozen.includes(n));
+            if (targets.length === 0) { player.sendMessage("§e[Anticheat]§r No freezable players online."); break; }
+            const modal = new ModalFormData().title("Freeze a Player").dropdown("Select player", targets, { defaultValueIndex: 0 });
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const name = targets[m.formValues[0]];
+                for (const p of world.getPlayers()) {
+                    if (p.name === name) { freezePlayer(p); player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cfrozen§r.`); break; }
+                }
+            }
+            break;
+        }
+        case 1: {
+            if (frozen.length === 0) { player.sendMessage("§e[Anticheat]§r No players are frozen."); break; }
+            const modal = new ModalFormData().title("Unfreeze a Player").dropdown("Select player", frozen, { defaultValueIndex: 0 });
+            const m = await showForm(player, modal);
+            if (m && !m.canceled) {
+                const name = frozen[m.formValues[0]];
+                if (unfreezePlayer(name)) player.sendMessage(`§e[Anticheat]§r §a${name}§r has been §aunfrozen§r.`);
+            }
+            break;
+        }
+        default:
+            await openMainMenu(player);
+    }
+}
+
+// --- PLAYER FREEZE ---
+// Admins can freeze a player in place for questioning. A frozen player cannot
+// move, cannot turn their head/camera, and cannot use items or interact with the
+// world. Implemented with the stable input-permission API (Movement + Camera),
+// with a position anchor as backup so knockback/pistons/water can't drift them
+// out of place. Frozen state persists across rejoins.
+const FROZEN_PROPERTY = "cheats:frozen";
+const freezeAnchors = new Map(); // name -> { x, y, z, dim }
+
+function getFrozen() {
+    try { const raw = world.getDynamicProperty(FROZEN_PROPERTY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+}
+function saveFrozen(list) {
+    try { world.setDynamicProperty(FROZEN_PROPERTY, JSON.stringify(list)); } catch (e) {}
+}
+function isFrozen(name) { return getFrozen().includes(name); }
+
+// Enable/disable the input categories that make up a freeze. Wrapped because
+// these throw on older builds; the anchor loop still holds the player if so.
+function setFreezeInput(player, frozen) {
+    try { player.inputPermissions.setPermissionCategory(InputPermissionCategory.Movement, !frozen); } catch (e) {}
+    try { player.inputPermissions.setPermissionCategory(InputPermissionCategory.Camera, !frozen); } catch (e) {}
+}
+
+function freezePlayer(player) {
+    const list = getFrozen();
+    if (!list.includes(player.name)) { list.push(player.name); saveFrozen(list); }
+    const l = player.location;
+    freezeAnchors.set(player.name, { x: l.x, y: l.y, z: l.z, dim: player.dimension.id });
+    setFreezeInput(player, true);
+    try { player.playSound("mob.shulker.close", { pitch: 0.7, volume: 1 }); } catch (e) {}
+    player.sendMessage("§l§c[Anticheat] §r§fYou have been §c§lFROZEN§r§f by an admin. Do not log out.");
+}
+
+function unfreezePlayer(name) {
+    const list = getFrozen();
+    const i = list.indexOf(name);
+    if (i !== -1) { list.splice(i, 1); saveFrozen(list); }
+    freezeAnchors.delete(name);
+    for (const p of world.getPlayers()) {
+        if (p.name === name) {
+            setFreezeInput(p, false);
+            try { p.playSound("mob.shulker.open", { pitch: 1.2, volume: 1 }); } catch (e) {}
+            p.sendMessage("§l§e[Anticheat] §r§fYou have been §aunfrozen§f.");
+        }
+    }
+    return i !== -1;
+}
+
+// Re-apply (or clear) freeze on join. Clearing matters: input permissions can
+// persist on a player, so a player who is NOT on the frozen list gets their
+// movement/camera explicitly restored — nobody can end up stuck if the pack is
+// reloaded or removed mid-freeze.
+world.afterEvents.playerSpawn.subscribe((event) => {
+    if (!event.initialSpawn) return;
+    const player = event.player;
+    system.runTimeout(() => {
+        try {
+            if (isFrozen(player.name)) {
+                const l = player.location;
+                freezeAnchors.set(player.name, { x: l.x, y: l.y, z: l.z, dim: player.dimension.id });
+                setFreezeInput(player, true);
+                player.sendMessage("§l§c[Anticheat] §r§fYou are still §c§lFROZEN§r§f.");
+            } else {
+                setFreezeInput(player, false);
+            }
+        } catch (e) {}
+    }, 20);
+});
+
+// Anchor + on-screen reminder. Input permissions stop deliberate movement; this
+// pulls them back if something external (knockback, pistons, flowing water)
+// shoves them more than a block from where they were frozen.
+system.runInterval(() => {
+    const list = getFrozen();
+    if (list.length === 0) return;
+    for (const player of world.getPlayers()) {
+        if (!list.includes(player.name)) continue;
+        try {
+            player.onScreenDisplay.setActionBar("§c§lFROZEN §r§7— an admin has frozen you");
+            const a = freezeAnchors.get(player.name);
+            if (!a) {
+                const l = player.location;
+                freezeAnchors.set(player.name, { x: l.x, y: l.y, z: l.z, dim: player.dimension.id });
+                continue;
+            }
+            const l = player.location;
+            const dx = l.x - a.x, dy = l.y - a.y, dz = l.z - a.z;
+            if (dx * dx + dy * dy + dz * dz > 1.0 || player.dimension.id !== a.dim) {
+                player.teleport({ x: a.x, y: a.y, z: a.z }, { dimension: world.getDimension(a.dim) });
+            }
+        } catch (e) {}
+    }
+}, 10);
+
+// A frozen player can't use items, break/place blocks, or interact with the
+// world — otherwise an ender pearl or chorus fruit would break the freeze.
+world.beforeEvents.itemUse.subscribe((event) => {
+    const player = event.source;
+    if (player?.typeId === "minecraft:player" && isFrozen(player.name)) event.cancel = true;
+});
+world.beforeEvents.playerBreakBlock.subscribe((event) => {
+    if (isFrozen(event.player.name)) event.cancel = true;
+});
+world.beforeEvents.playerInteractWithBlock.subscribe((event) => {
+    if (isFrozen(event.player.name)) event.cancel = true;
+});
+world.beforeEvents.playerInteractWithEntity.subscribe((event) => {
+    if (isFrozen(event.player.name)) event.cancel = true;
+});
 
 // --- ILLEGAL ITEMS DEFINITION ---
 const ILLEGAL_ITEMS = new Set([
