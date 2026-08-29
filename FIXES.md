@@ -153,6 +153,35 @@ escalation counter is cleared alongside the log.
   there (cross-dimension aware), and the **Player History** panel screen gets a
   "Teleport to last offense" button. Cleared alongside the log.
 
+## Admin player tools: inspect, teleport, rejoin summary (new)
+
+**Inventory inspector** — `/cheats:inv <player>` (or the panel) shows a read-only
+view of an online player's full inventory plus equipped armour/offhand, with any
+illegal item highlighted in red and tagged `(ILLEGAL)`. Lets an admin verify what
+someone is actually carrying instead of relying only on what the scanner flagged.
+Note: it reads top-level slots — items nested inside a shulker box in their
+inventory aren't enumerable through the script API.
+
+**Teleports** — `/cheats:bring <player>` pulls a player to the admin,
+`/cheats:goto <player>` sends the admin to them. Bringing a *frozen* player also
+moves their freeze anchor, otherwise the freeze loop would drag them straight
+back.
+
+**Players panel** — a new **Players** screen lists online players (marked
+`admin` / `frozen`); picking one offers Inspect Inventory, Bring to Me, Teleport
+to Them, Freeze/Unfreeze, and View History in one place.
+
+**Rejoin summary** — every detection is appended to a capped rolling log
+(`cheats:recentEvents`, epoch-stamped, 60 entries), every ban to a second one
+(`cheats:recentBans`, 30 entries), and each player's logout time is recorded
+(`cheats:lastSeen`). When an admin joins, they get a digest of what happened
+while they were offline: total detections, how many players, the top offenders,
+and **every ban with the duration it was issued for** — marked `auto` or `by
+<admin>`, and annotated with the time still left to serve (or "no longer banned"
+if it expired or was lifted). The baseline is updated after showing it, so the
+same summary is never repeated; an admin's first ever join just starts the clock
+silently.
+
 ## Player freeze (new)
 
 Admins can freeze a player in place for questioning: `/cheats:freeze <player>`,

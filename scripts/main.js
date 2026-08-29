@@ -72,6 +72,7 @@ function recordDupeHistory(playerName, type, dimension) {
         const timestamp = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
         const dimName = dimension ? dimension.replace("minecraft:", "") : "overworld";
         history[playerName].unshift({ timestamp, type, dimension: dimName });
+        recordRecentEvent(playerName, type);
         if (history[playerName].length > MAX_HISTORY_PER_PLAYER) history[playerName] = history[playerName].slice(0, MAX_HISTORY_PER_PLAYER);
         saveDupeHistory(history);
     } catch (e) { console.warn(`[Anticheat] Failed to record dupe history: ${e}`); }
@@ -358,6 +359,7 @@ function checkAutoBan(player) {
     const strikes = incrementBanStrike(player.name);
     const { until, label } = banForStrike(strikes);
     addBan(player.name, until);
+    recordRecentBan(player.name, label, null);
     // Public announcement (visible even if the kick can't fire, e.g. the world
     // owner on a single-player/LAN host, who cannot be kicked).
     world.sendMessage(`§l§e[Anticheat] §r§c${player.name} §fhas been §c§lBANNED §r§ffor repeat duping §7(${label})§f. Told you not to do it again.`);
@@ -423,6 +425,9 @@ system.beforeEvents.startup.subscribe((init) => {
                     msg += `  §f/cheats:viewlog §7- View the dupe log\n`;
                     msg += `  §f/cheats:history <player> §7- View a player's history\n`;
                     msg += `  §f/cheats:tp <player> §7- Teleport to a player's last offense\n`;
+                    msg += `  §f/cheats:inv <player> §7- Inspect a player's inventory\n`;
+                    msg += `  §f/cheats:bring <player> §7- Teleport a player to you\n`;
+                    msg += `  §f/cheats:goto <player> §7- Teleport yourself to a player\n`;
                     msg += `  §f/cheats:freeze <player> §7- Freeze a player in place\n`;
                     msg += `  §f/cheats:unfreeze <player> §7- Unfreeze a player\n`;
                     msg += `  §f/cheats:frozen §7- List frozen players\n`;
@@ -641,6 +646,60 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
+        { name: "cheats:inv", description: "Inspect a player's inventory (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (!target) { player.sendMessage(`§e[Anticheat]§c Player §f${name}§c not found (must be online).`); return; }
+                player.sendMessage(`§e[Anticheat] §lInventory: §f${name}§r\n` + describeInventory(target).join("\n"));
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:bring", description: "Teleport a player to you (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (!target) { player.sendMessage(`§e[Anticheat]§c Player §f${name}§c not found (must be online).`); return; }
+                bringPlayer(player, target);
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:goto", description: "Teleport yourself to a player (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
+          mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
+        (origin, playerName) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => {
+                if (!player.hasTag("admin")) { player.sendMessage(`§e[Anticheat]§c No permission.`); return; }
+                const name = (playerName || "").trim();
+                let target = null;
+                for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+                if (!target) { player.sendMessage(`§e[Anticheat]§c Player §f${name}§c not found (must be online).`); return; }
+                gotoPlayer(player, target);
+            });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
         { name: "cheats:freeze", description: "Freeze a player in place (requires admin tag)", permissionLevel: CommandPermissionLevel.Any,
           mandatoryParameters: [{ name: "playerName", type: CustomCommandParamType.String }] },
         (origin, playerName) => {
@@ -734,6 +793,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 const until = d > 0 ? Date.now() + d * DAY_MS : 0;
                 const label = d > 0 ? `${d} day${d !== 1 ? "s" : ""}` : "permanent";
                 addBan(name, until);
+                recordRecentBan(name, label, player.name);
                 if (target) kickPlayer(target, `Anticheat: you are banned (${label})`);
                 player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned §f(${label})§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             });
@@ -923,6 +983,7 @@ async function openMainMenu(player) {
         form.button("Whitelist");       actions.push(openWhitelistMenu);
         form.button("Bans");            actions.push(openBansMenu);
         form.button("Freeze Players");  actions.push(openFreezeMenu);
+        form.button("Players");         actions.push(openPlayersMenu);
     }
     const res = await showForm(player, form);
     if (!res || res.canceled) return;
@@ -1155,6 +1216,7 @@ async function openBansMenu(player) {
                 const until = d > 0 ? Date.now() + d * DAY_MS : 0;
                 const label = d > 0 ? `${d} day${d !== 1 ? "s" : ""}` : "permanent";
                 addBan(name, until);
+                recordRecentBan(name, label, player.name);
                 if (target) kickPlayer(target, `Anticheat: you are banned (${label})`);
                 player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned §f(${label})§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             }
@@ -1250,6 +1312,218 @@ async function openFreezeMenu(player) {
         }
         default:
             await openMainMenu(player);
+    }
+}
+
+// --- ADMIN PLAYER TOOLS (inspect / teleport) + REJOIN SUMMARY ---
+const RECENT_EVENTS_PROPERTY = "cheats:recentEvents";
+const RECENT_BANS_PROPERTY = "cheats:recentBans";
+const MAX_RECENT_BANS = 30;
+const LAST_SEEN_PROPERTY = "cheats:lastSeen";
+const MAX_RECENT_EVENTS = 60;
+
+// Rolling log of recent detections (epoch-stamped) so an admin can be told what
+// happened while they were offline. Capped so the dynamic property stays small.
+function getRecentEvents() {
+    try { const raw = world.getDynamicProperty(RECENT_EVENTS_PROPERTY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+}
+function saveRecentEvents(list) {
+    try { world.setDynamicProperty(RECENT_EVENTS_PROPERTY, JSON.stringify(list)); } catch (e) {}
+}
+function recordRecentEvent(name, type) {
+    try {
+        const list = getRecentEvents();
+        list.unshift({ t: Date.now(), n: name, k: type });
+        if (list.length > MAX_RECENT_EVENTS) list.length = MAX_RECENT_EVENTS;
+        saveRecentEvents(list);
+    } catch (e) {}
+}
+
+// Rolling log of bans (auto and manual) so an admin returning can be told who
+// was banned while they were away, and for how long.
+function getRecentBans() {
+    try { const raw = world.getDynamicProperty(RECENT_BANS_PROPERTY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+}
+function saveRecentBans(list) {
+    try { world.setDynamicProperty(RECENT_BANS_PROPERTY, JSON.stringify(list)); } catch (e) {}
+}
+// label = human duration at ban time ("1 day" / "permanent"); by = issuing admin,
+// or null for an automatic ban.
+function recordRecentBan(name, label, by) {
+    try {
+        const list = getRecentBans();
+        list.unshift({ t: Date.now(), n: name, d: label, by: by || null });
+        if (list.length > MAX_RECENT_BANS) list.length = MAX_RECENT_BANS;
+        saveRecentBans(list);
+    } catch (e) {}
+}
+
+function getLastSeen() {
+    try { const raw = world.getDynamicProperty(LAST_SEEN_PROPERTY); return raw ? JSON.parse(raw) : {}; }
+    catch (e) { return {}; }
+}
+function saveLastSeen(map) {
+    try { world.setDynamicProperty(LAST_SEEN_PROPERTY, JSON.stringify(map)); } catch (e) {}
+}
+function markSeen(name) { const m = getLastSeen(); m[name] = Date.now(); saveLastSeen(m); }
+
+world.afterEvents.playerLeave.subscribe((event) => {
+    try { markSeen(event.playerName); } catch (e) {}
+});
+
+// On an admin's join, summarise detections logged since they were last online.
+world.afterEvents.playerSpawn.subscribe((event) => {
+    if (!event.initialSpawn) return;
+    const player = event.player;
+    if (!player.hasTag("admin")) return;
+    system.runTimeout(() => {
+        try {
+            const seen = getLastSeen()[player.name];
+            // No baseline yet (first join since install) — just start the clock.
+            if (!seen) { markSeen(player.name); return; }
+            const events = getRecentEvents().filter((e) => e.t > seen);
+            const bans = getRecentBans().filter((b) => b.t > seen);
+            markSeen(player.name); // don't repeat this summary on the next rejoin
+            if (events.length === 0 && bans.length === 0) return;
+            let msg = `§l§e[Anticheat] §r§fWhile you were away:§r\n`;
+            if (events.length) {
+                const byPlayer = {};
+                for (const e of events) byPlayer[e.n] = (byPlayer[e.n] || 0) + 1;
+                const names = Object.keys(byPlayer).sort((a, b) => byPlayer[b] - byPlayer[a]);
+                msg += `§c${events.length}§f detection(s) from §c${names.length}§f player(s)§r\n`;
+                for (const n of names.slice(0, 6)) msg += `  §c${n}§r §7x${byPlayer[n]}§r\n`;
+                if (names.length > 6) msg += `  §7…and ${names.length - 6} more§r\n`;
+            }
+            if (bans.length) {
+                msg += `§4${bans.length}§f ban(s):§r\n`;
+                const current = getBans();
+                for (const b of bans.slice(0, 6)) {
+                    const who = b.by ? `§7by ${b.by}` : "§7auto";
+                    // Show what they're still serving, so an expired or lifted ban is obvious.
+                    const held = current[b.n];
+                    const now = held === undefined ? "§8(no longer banned)" : `§8(${formatRemaining(held)} left)`;
+                    msg += `  §c${b.n}§r §f${b.d}§r ${who}§r ${now}§r\n`;
+                }
+                if (bans.length > 6) msg += `  §7…and ${bans.length - 6} more§r\n`;
+            }
+            msg += `§7Open /cheats:ui → Dupe Log or Bans for details.`;
+            player.sendMessage(msg);
+        } catch (e) {}
+    }, 80);
+});
+
+// --- INVENTORY INSPECTOR ---
+function formatInspectItem(item) {
+    const name = item.typeId.replace("minecraft:", "");
+    const amount = item.amount > 1 ? ` §7x${item.amount}` : "";
+    if (isIllegalItem(item)) return `§c${name}§r${amount} §4(ILLEGAL)`;
+    return `§f${name}§r${amount}`;
+}
+
+function describeInventory(target) {
+    const lines = [];
+    try {
+        const eq = target.getComponent("equippable");
+        const gear = [];
+        for (const slot of ["Mainhand", "Offhand", "Head", "Chest", "Legs", "Feet"]) {
+            try {
+                const it = eq?.getEquipment(slot);
+                if (it) gear.push(`  §7${slot}:§r ${formatInspectItem(it)}`);
+            } catch (e) {}
+        }
+        if (gear.length) { lines.push("§l§eEquipped§r"); lines.push(...gear); lines.push(""); }
+    } catch (e) {}
+    try {
+        const c = target.getComponent("inventory")?.container;
+        if (!c) { lines.push("§cInventory unavailable."); return lines; }
+        let used = 0;
+        const items = [];
+        for (let i = 0; i < c.size; i++) {
+            const it = c.getItem(i);
+            if (!it) continue;
+            used++;
+            items.push(`  §7${i}:§r ${formatInspectItem(it)}`);
+        }
+        lines.push(`§l§eInventory§r §7(${used}/${c.size} slots)`);
+        lines.push(...(items.length ? items : ["  §7(empty)"]));
+    } catch (e) { lines.push("§cInventory unavailable."); }
+    return lines;
+}
+
+async function showInventoryReport(admin, target) {
+    const body = describeInventory(target).join("\n");
+    const form = new ActionFormData().title(`Inventory: ${target.name}`).body(body).button("Back");
+    const r = await showForm(admin, form);
+    if (r && !r.canceled) await openPlayerActionsMenu(admin, target.name);
+}
+
+// --- ADMIN TELEPORTS ---
+function bringPlayer(admin, target) {
+    try {
+        const l = admin.location;
+        target.teleport({ x: l.x, y: l.y, z: l.z }, { dimension: admin.dimension });
+        // Keep a frozen player's anchor with them, or the freeze loop drags them back.
+        if (isFrozen(target.name)) freezeAnchors.set(target.name, { x: l.x, y: l.y, z: l.z, dim: admin.dimension.id });
+        admin.sendMessage(`§e[Anticheat]§r Brought §f${target.name}§r to you.`);
+        target.sendMessage(`§e[Anticheat]§r You were teleported by an admin.`);
+    } catch (e) { admin.sendMessage(`§e[Anticheat]§c Teleport failed: ${e}`); }
+}
+
+function gotoPlayer(admin, target) {
+    try {
+        const l = target.location;
+        admin.teleport({ x: l.x, y: l.y, z: l.z }, { dimension: target.dimension });
+        admin.sendMessage(`§e[Anticheat]§r Teleported to §f${target.name}§r.`);
+    } catch (e) { admin.sendMessage(`§e[Anticheat]§c Teleport failed: ${e}`); }
+}
+
+// --- PLAYERS PANEL ---
+async function openPlayersMenu(player) {
+    const online = world.getPlayers().filter((p) => p.name !== player.name);
+    if (online.length === 0) { player.sendMessage("§e[Anticheat]§r No other players are online."); return; }
+    const form = new ActionFormData().title("Players").body("Select a player:");
+    for (const p of online) {
+        const marks = [];
+        if (p.hasTag("admin")) marks.push("admin");
+        if (isFrozen(p.name)) marks.push("frozen");
+        form.button(`${p.name}${marks.length ? `\n§7${marks.join(" · ")}` : ""}`);
+    }
+    form.button("Back");
+    const res = await showForm(player, form);
+    if (!res || res.canceled) return;
+    if (res.selection >= online.length) { await openMainMenu(player); return; }
+    await openPlayerActionsMenu(player, online[res.selection].name);
+}
+
+async function openPlayerActionsMenu(admin, name) {
+    let target = null;
+    for (const p of world.getPlayers()) { if (p.name === name) { target = p; break; } }
+    if (!target) { admin.sendMessage(`§e[Anticheat]§c §f${name}§c is no longer online.`); return; }
+    const frozen = isFrozen(name);
+    const form = new ActionFormData()
+        .title(name)
+        .body(`Actions for §f${name}§r${frozen ? " §c(frozen)" : ""}`)
+        .button("Inspect Inventory")
+        .button("Bring to Me")
+        .button("Teleport to Them")
+        .button(frozen ? "Unfreeze" : "Freeze")
+        .button("View History")
+        .button("Back");
+    const res = await showForm(admin, form);
+    if (!res || res.canceled) return;
+    switch (res.selection) {
+        case 0: await showInventoryReport(admin, target); break;
+        case 1: bringPlayer(admin, target); break;
+        case 2: gotoPlayer(admin, target); break;
+        case 3:
+            if (frozen) { unfreezePlayer(name); admin.sendMessage(`§e[Anticheat]§r §a${name}§r has been §aunfrozen§r.`); }
+            else if (target.hasTag("admin")) admin.sendMessage("§e[Anticheat]§c You cannot freeze an admin.");
+            else { freezePlayer(target); admin.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cfrozen§r.`); }
+            break;
+        case 4: await showPlayerHistory(admin, name); break;
+        default: await openPlayersMenu(admin);
     }
 }
 
