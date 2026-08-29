@@ -172,11 +172,15 @@ back.
 to Them, Freeze/Unfreeze, and View History in one place.
 
 **Rejoin summary** — every detection is appended to a capped rolling log
-(`cheats:recentEvents`, epoch-stamped, 60 entries) and each player's logout time
-is recorded (`cheats:lastSeen`). When an admin joins, they get a digest of what
-happened while they were offline: total detections, how many players, and the top
-offenders. The baseline is updated after showing it, so the same summary is never
-repeated; an admin's first ever join just starts the clock silently.
+(`cheats:recentEvents`, epoch-stamped, 60 entries), every ban to a second one
+(`cheats:recentBans`, 30 entries), and each player's logout time is recorded
+(`cheats:lastSeen`). When an admin joins, they get a digest of what happened
+while they were offline: total detections, how many players, the top offenders,
+and **every ban with the duration it was issued for** — marked `auto` or `by
+<admin>`, and annotated with the time still left to serve (or "no longer banned"
+if it expired or was lifted). The baseline is updated after showing it, so the
+same summary is never repeated; an admin's first ever join just starts the clock
+silently.
 
 ## Player freeze (new)
 

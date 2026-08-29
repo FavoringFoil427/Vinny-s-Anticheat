@@ -359,6 +359,7 @@ function checkAutoBan(player) {
     const strikes = incrementBanStrike(player.name);
     const { until, label } = banForStrike(strikes);
     addBan(player.name, until);
+    recordRecentBan(player.name, label, null);
     // Public announcement (visible even if the kick can't fire, e.g. the world
     // owner on a single-player/LAN host, who cannot be kicked).
     world.sendMessage(`§l§e[Anticheat] §r§c${player.name} §fhas been §c§lBANNED §r§ffor repeat duping §7(${label})§f. Told you not to do it again.`);
@@ -792,6 +793,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 const until = d > 0 ? Date.now() + d * DAY_MS : 0;
                 const label = d > 0 ? `${d} day${d !== 1 ? "s" : ""}` : "permanent";
                 addBan(name, until);
+                recordRecentBan(name, label, player.name);
                 if (target) kickPlayer(target, `Anticheat: you are banned (${label})`);
                 player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned §f(${label})§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             });
@@ -1214,6 +1216,7 @@ async function openBansMenu(player) {
                 const until = d > 0 ? Date.now() + d * DAY_MS : 0;
                 const label = d > 0 ? `${d} day${d !== 1 ? "s" : ""}` : "permanent";
                 addBan(name, until);
+                recordRecentBan(name, label, player.name);
                 if (target) kickPlayer(target, `Anticheat: you are banned (${label})`);
                 player.sendMessage(`§e[Anticheat]§r §c${name}§r has been §cbanned §f(${label})§r${target ? " and kicked" : " (will be kicked on join)"}.`);
             }
@@ -1314,6 +1317,8 @@ async function openFreezeMenu(player) {
 
 // --- ADMIN PLAYER TOOLS (inspect / teleport) + REJOIN SUMMARY ---
 const RECENT_EVENTS_PROPERTY = "cheats:recentEvents";
+const RECENT_BANS_PROPERTY = "cheats:recentBans";
+const MAX_RECENT_BANS = 30;
 const LAST_SEEN_PROPERTY = "cheats:lastSeen";
 const MAX_RECENT_EVENTS = 60;
 
@@ -1332,6 +1337,26 @@ function recordRecentEvent(name, type) {
         list.unshift({ t: Date.now(), n: name, k: type });
         if (list.length > MAX_RECENT_EVENTS) list.length = MAX_RECENT_EVENTS;
         saveRecentEvents(list);
+    } catch (e) {}
+}
+
+// Rolling log of bans (auto and manual) so an admin returning can be told who
+// was banned while they were away, and for how long.
+function getRecentBans() {
+    try { const raw = world.getDynamicProperty(RECENT_BANS_PROPERTY); return raw ? JSON.parse(raw) : []; }
+    catch (e) { return []; }
+}
+function saveRecentBans(list) {
+    try { world.setDynamicProperty(RECENT_BANS_PROPERTY, JSON.stringify(list)); } catch (e) {}
+}
+// label = human duration at ban time ("1 day" / "permanent"); by = issuing admin,
+// or null for an automatic ban.
+function recordRecentBan(name, label, by) {
+    try {
+        const list = getRecentBans();
+        list.unshift({ t: Date.now(), n: name, d: label, by: by || null });
+        if (list.length > MAX_RECENT_BANS) list.length = MAX_RECENT_BANS;
+        saveRecentBans(list);
     } catch (e) {}
 }
 
@@ -1359,15 +1384,31 @@ world.afterEvents.playerSpawn.subscribe((event) => {
             // No baseline yet (first join since install) — just start the clock.
             if (!seen) { markSeen(player.name); return; }
             const events = getRecentEvents().filter((e) => e.t > seen);
+            const bans = getRecentBans().filter((b) => b.t > seen);
             markSeen(player.name); // don't repeat this summary on the next rejoin
-            if (events.length === 0) return;
-            const byPlayer = {};
-            for (const e of events) byPlayer[e.n] = (byPlayer[e.n] || 0) + 1;
-            const names = Object.keys(byPlayer).sort((a, b) => byPlayer[b] - byPlayer[a]);
-            let msg = `§l§e[Anticheat] §r§fWhile you were away: §c${events.length}§f detection(s) from §c${names.length}§f player(s)\n`;
-            for (const n of names.slice(0, 6)) msg += `  §c${n}§r §7x${byPlayer[n]}§r\n`;
-            if (names.length > 6) msg += `  §7…and ${names.length - 6} more§r\n`;
-            msg += `§7Open /cheats:ui → Dupe Log for details.`;
+            if (events.length === 0 && bans.length === 0) return;
+            let msg = `§l§e[Anticheat] §r§fWhile you were away:§r\n`;
+            if (events.length) {
+                const byPlayer = {};
+                for (const e of events) byPlayer[e.n] = (byPlayer[e.n] || 0) + 1;
+                const names = Object.keys(byPlayer).sort((a, b) => byPlayer[b] - byPlayer[a]);
+                msg += `§c${events.length}§f detection(s) from §c${names.length}§f player(s)§r\n`;
+                for (const n of names.slice(0, 6)) msg += `  §c${n}§r §7x${byPlayer[n]}§r\n`;
+                if (names.length > 6) msg += `  §7…and ${names.length - 6} more§r\n`;
+            }
+            if (bans.length) {
+                msg += `§4${bans.length}§f ban(s):§r\n`;
+                const current = getBans();
+                for (const b of bans.slice(0, 6)) {
+                    const who = b.by ? `§7by ${b.by}` : "§7auto";
+                    // Show what they're still serving, so an expired or lifted ban is obvious.
+                    const held = current[b.n];
+                    const now = held === undefined ? "§8(no longer banned)" : `§8(${formatRemaining(held)} left)`;
+                    msg += `  §c${b.n}§r §f${b.d}§r ${who}§r ${now}§r\n`;
+                }
+                if (bans.length > 6) msg += `  §7…and ${bans.length - 6} more§r\n`;
+            }
+            msg += `§7Open /cheats:ui → Dupe Log or Bans for details.`;
             player.sendMessage(msg);
         } catch (e) {}
     }, 80);
