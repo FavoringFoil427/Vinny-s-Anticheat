@@ -1791,35 +1791,60 @@ function totalItems(counts) {
     return total;
 }
 
+// Consecutive suspicious (empty) inventory reads per player, so a genuine
+// "I emptied everything into a chest" eventually updates the baseline instead of
+// being skipped forever.
+const invSkipStreak = new Map();
+
+// Players who have just rejoined and whose comparison hasn't run yet. Snapshots
+// are suppressed for them: the save interval would otherwise overwrite the
+// pre-disconnect baseline with their post-rejoin inventory before the check ever
+// reads it, making the comparison meaningless.
+const invPendingCheck = new Set();
+
 // Snapshot the player's live inventory. Written continuously so the most recent
-// snapshot reflects what they legitimately held before a disconnect. Undebounced
-// so the baseline always matches the real online inventory.
+// snapshot reflects what they legitimately held before a disconnect.
 //
-// Teleport / chunk-reload hardening: while a player is being reloaded (a TP mod,
-// dimension change, or the chunk streaming back in) the inventory can briefly
-// read EMPTY or PARTIAL. If that transient read were saved as the baseline, the
-// player's real items would look like a surplus "dupe" moments later and get
-// deleted. So we never let a suspicious shrink overwrite a good snapshot: a
-// stale-but-higher baseline is safe (it can only miss a dupe, never invent one),
-// whereas a too-low baseline is exactly what fabricates false positives.
-function savePlayerInventory(player) {
+// Only a read that comes back EMPTY over a non-empty baseline is treated as a
+// transient reload (TP mod, dimension change, chunk streaming back in). A large
+// but non-zero drop is ordinary play — dumping a chest, dying, building through a
+// stack — and MUST be recorded. Skipping those (the old >50% shrink rule) froze
+// the baseline at a stale high-water mark, after which every item the player
+// picked up looked like surplus and was reported as a dupe on their next rejoin.
+function savePlayerInventory(player, force = false) {
     if (!getInventorySyncSetting()) return;
     try {
+        if (!force && invPendingCheck.has(player.id)) return; // don't clobber the baseline pre-check
         const container = player.getComponent("inventory")?.container;
         if (!container) return; // entity mid-reload; not safe to snapshot
         const currentCounts = getPlayerInventoryMap(player);
         const total = totalItems(currentCounts);
-        const prevRaw = world.getDynamicProperty(`dp_inv_${player.id}`);
-        if (prevRaw) {
-            const prevTotal = totalItems(JSON.parse(prevRaw));
-            // Empty read over a non-empty baseline, or a drastic (>50%) shrink,
-            // is almost always a transient reload rather than a real change.
-            if (prevTotal > 0 && total === 0) return;
-            if (prevTotal > 0 && total < prevTotal * 0.5) return;
+        const key = `dp_inv_${player.id}`;
+        if (!force) {
+            const prevRaw = world.getDynamicProperty(key);
+            if (prevRaw) {
+                const prevTotal = totalItems(JSON.parse(prevRaw));
+                if (prevTotal > 0 && total === 0) {
+                    const streak = (invSkipStreak.get(player.id) || 0) + 1;
+                    invSkipStreak.set(player.id, streak);
+                    // A real reload recovers within a tick or two; if it still
+                    // reads empty after a few passes, they really are empty.
+                    if (streak < 3) return;
+                }
+            }
         }
-        world.setDynamicProperty(`dp_inv_${player.id}`, JSON.stringify(currentCounts));
+        invSkipStreak.delete(player.id);
+        world.setDynamicProperty(key, JSON.stringify(currentCounts));
     } catch (e) {}
 }
+
+// Take a final snapshot the moment a player leaves. The interval snapshot can be
+// up to a second stale, so anything picked up just before disconnecting would
+// otherwise be missing from the baseline and get reported as a dupe on rejoin.
+world.beforeEvents.playerLeave.subscribe((event) => {
+    try { savePlayerInventory(event.player, true); } catch (e) {}
+    try { invSkipStreak.delete(event.player.id); invPendingCheck.delete(event.player.id); } catch (e) {}
+});
 
 // Once per second is plenty to keep a fresh pre-disconnect snapshot, and it
 // avoids writing a dynamic property several times per second per player.
@@ -1881,7 +1906,15 @@ world.afterEvents.playerSpawn.subscribe((event) => {
     // player is OFFLINE, so a rejoin is the only moment worth comparing.
     if (!event.initialSpawn) return;
     const player = event.player;
-    system.runTimeout(() => runSpawnCheck(player), 40);
+    const id = player.id;
+    invPendingCheck.add(id);
+    system.runTimeout(() => {
+        try { runSpawnCheck(player); } catch (e) {}
+        // Release the hold so normal snapshotting resumes, and immediately record
+        // a fresh baseline for this session.
+        invPendingCheck.delete(id);
+        try { savePlayerInventory(player, true); } catch (e) {}
+    }, 40);
 });
 
 // --- ILLEGAL ITEMS: PLAYER INVENTORY SCAN ---

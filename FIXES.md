@@ -182,6 +182,36 @@ if it expired or was lifted). The baseline is updated after showing it, so the
 same summary is never repeated; an admin's first ever join just starts the clock
 silently.
 
+## Inventory Sync false positives on rejoin (fixed, again)
+
+Players kept being reported for "syncing duplicated <item>" on rejoin for
+ordinary things they had just picked up. Two independent bugs, both in the
+baseline snapshot rather than the comparison:
+
+1. **The `>50% shrink` guard froze the baseline.** It was meant to ignore a
+   transient empty/partial read during an entity reload, but it skipped the save
+   for *any* drop over half — which is routine play: dumping into a chest, dying,
+   building through a stack. Once skipped, the stored baseline stayed at the old
+   high-water mark indefinitely, so every item picked up afterwards exceeded it
+   and was reported as surplus on the next rejoin. That is why it recurred rather
+   than happening once. Now only a read that comes back **empty** over a non-empty
+   baseline is treated as transient, and even that gives up after 3 consecutive
+   empty reads so a player who genuinely empties their inventory still gets a
+   correct baseline.
+
+2. **The save interval clobbered the baseline before the check read it.**
+   Snapshots ran every 20 ticks for all online players, but `runSpawnCheck` only
+   runs 40 ticks after a rejoin — so the pre-disconnect baseline was usually
+   overwritten with the post-rejoin inventory first, making the comparison
+   meaningless (and, when the early save was skipped because the inventory
+   component wasn't loaded yet, leaving the stale baseline to fire false alarms).
+   Snapshots are now suppressed for a player from the moment they rejoin until
+   their check has run (`invPendingCheck`), after which a fresh baseline is taken.
+
+Also added: a **final snapshot on `beforeEvents.playerLeave`**, so items picked up
+in the last second before disconnecting are part of the baseline instead of
+looking like a dupe on return.
+
 ## Player freeze (new)
 
 Admins can freeze a player in place for questioning: `/cheats:freeze <player>`,
