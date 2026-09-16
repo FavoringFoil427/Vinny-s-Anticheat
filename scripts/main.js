@@ -1846,8 +1846,36 @@ world.beforeEvents.playerLeave.subscribe((event) => {
     try { invSkipStreak.delete(event.player.id); invPendingCheck.delete(event.player.id); } catch (e) {}
 });
 
-// Once per second is plenty to keep a fresh pre-disconnect snapshot, and it
-// avoids writing a dynamic property several times per second per player.
+// Event-driven baseline refresh. Any change to a player's inventory — picking an
+// item up, crafting, moving something to or from a chest — marks them dirty, and
+// a short flush loop re-snapshots just those players. This keeps the baseline
+// within a few ticks of reality instead of up to a second stale, which is what
+// made recently acquired items look like a dupe on the next rejoin.
+//
+// Dirty-flagging rather than snapshotting inside the event matters: filling a
+// stack fires the event many times in a tick, and each snapshot is a dynamic
+// property write. Coalescing keeps that to at most one write per player per flush.
+const invDirty = new Set();
+
+try {
+    world.afterEvents.playerInventoryItemChange.subscribe((event) => {
+        try { if (event.player) invDirty.add(event.player.id); } catch (e) {}
+    });
+} catch (e) {
+    // Older builds without this event simply fall back to the interval below.
+    console.warn(`[Anticheat] playerInventoryItemChange unavailable: ${e}`);
+}
+
+system.runInterval(() => {
+    if (!getInventorySyncSetting()) { invDirty.clear(); return; }
+    if (invDirty.size === 0) return;
+    for (const player of world.getPlayers()) {
+        if (invDirty.has(player.id)) savePlayerInventory(player);
+    }
+    invDirty.clear(); // also drops ids belonging to players who have since left
+}, 5);
+
+// Backstop sweep, in case an inventory change ever lands without firing the event.
 system.runInterval(() => {
     if (!getInventorySyncSetting()) return;
     for (const player of world.getPlayers()) savePlayerInventory(player);

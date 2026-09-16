@@ -212,6 +212,22 @@ Also added: a **final snapshot on `beforeEvents.playerLeave`**, so items picked 
 in the last second before disconnecting are part of the baseline instead of
 looking like a dupe on return.
 
+## Event-driven Inventory Sync baseline (new)
+
+The baseline snapshot is no longer driven only by a timer. `playerInventoryItemChange`
+(stable since `@minecraft/server` **2.1.0**, so no manifest bump was needed) marks a
+player dirty on any inventory change — picking an item up, crafting, moving items to
+or from a chest — and a 5-tick flush loop re-snapshots just those players. The
+baseline now tracks reality within a few ticks instead of being up to a second
+stale, which is what made recently acquired items look like a dupe on rejoin.
+
+Players are dirty-flagged rather than snapshotted inside the event handler on
+purpose: filling a stack fires the event many times in a single tick and every
+snapshot is a dynamic-property write, so coalescing holds it to at most one write
+per player per flush. The 20-tick full sweep is kept as a backstop in case a change
+ever lands without firing the event, and the subscription is wrapped so a build
+without the event degrades to the timer instead of failing to load.
+
 ## Player freeze (new)
 
 Admins can freeze a player in place for questioning: `/cheats:freeze <player>`,
