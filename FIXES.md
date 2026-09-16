@@ -182,6 +182,52 @@ if it expired or was lifted). The baseline is updated after showing it, so the
 same summary is never repeated; an admin's first ever join just starts the clock
 silently.
 
+## Inventory Sync false positives on rejoin (fixed, again)
+
+Players kept being reported for "syncing duplicated <item>" on rejoin for
+ordinary things they had just picked up. Two independent bugs, both in the
+baseline snapshot rather than the comparison:
+
+1. **The `>50% shrink` guard froze the baseline.** It was meant to ignore a
+   transient empty/partial read during an entity reload, but it skipped the save
+   for *any* drop over half — which is routine play: dumping into a chest, dying,
+   building through a stack. Once skipped, the stored baseline stayed at the old
+   high-water mark indefinitely, so every item picked up afterwards exceeded it
+   and was reported as surplus on the next rejoin. That is why it recurred rather
+   than happening once. Now only a read that comes back **empty** over a non-empty
+   baseline is treated as transient, and even that gives up after 3 consecutive
+   empty reads so a player who genuinely empties their inventory still gets a
+   correct baseline.
+
+2. **The save interval clobbered the baseline before the check read it.**
+   Snapshots ran every 20 ticks for all online players, but `runSpawnCheck` only
+   runs 40 ticks after a rejoin — so the pre-disconnect baseline was usually
+   overwritten with the post-rejoin inventory first, making the comparison
+   meaningless (and, when the early save was skipped because the inventory
+   component wasn't loaded yet, leaving the stale baseline to fire false alarms).
+   Snapshots are now suppressed for a player from the moment they rejoin until
+   their check has run (`invPendingCheck`), after which a fresh baseline is taken.
+
+Also added: a **final snapshot on `beforeEvents.playerLeave`**, so items picked up
+in the last second before disconnecting are part of the baseline instead of
+looking like a dupe on return.
+
+## Event-driven Inventory Sync baseline (new)
+
+The baseline snapshot is no longer driven only by a timer. `playerInventoryItemChange`
+(stable since `@minecraft/server` **2.1.0**, so no manifest bump was needed) marks a
+player dirty on any inventory change — picking an item up, crafting, moving items to
+or from a chest — and a 5-tick flush loop re-snapshots just those players. The
+baseline now tracks reality within a few ticks instead of being up to a second
+stale, which is what made recently acquired items look like a dupe on rejoin.
+
+Players are dirty-flagged rather than snapshotted inside the event handler on
+purpose: filling a stack fires the event many times in a single tick and every
+snapshot is a dynamic-property write, so coalescing holds it to at most one write
+per player per flush. The 20-tick full sweep is kept as a backstop in case a change
+ever lands without firing the event, and the subscription is wrapped so a build
+without the event degrades to the timer instead of failing to load.
+
 ## Player freeze (new)
 
 Admins can freeze a player in place for questioning: `/cheats:freeze <player>`,
