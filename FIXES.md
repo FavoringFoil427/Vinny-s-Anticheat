@@ -228,28 +228,40 @@ per player per flush. The 20-tick full sweep is kept as a backstop in case a cha
 ever lands without firing the event, and the subscription is wrapped so a build
 without the event degrades to the timer instead of failing to load.
 
-## TNT dupe protection (new, default OFF)
+## Allow TNT Duping toggle (new, default OFF)
 
-Optional protection against TNT dupers, which work by having a piston move a TNT
-block. Detection reuses the existing piston sweep: a piston positioned to push
-TNT — directly adjacent, in its push line, or adjacent to a block in that line —
-has the **piston** popped off and returned as an item, exactly as the container
-version does. Covers `minecraft:tnt` and `minecraft:underwater_tnt`.
+A single switch deciding whether TNT is inside the anticheat's normal dupe
+protections or exempt from them — the same idea as Paper's
+`allow-piston-duplication`, which also defaults to off.
 
-**Default off on purpose.** Plenty of servers treat TNT duping as an accepted
-mechanic (world eaters, quarries), and the detection cannot tell a duper from a
-legitimate TNT cannon or any other contraption that pushes TNT with a piston —
-both get the piston popped. It is opt-in for servers that actually want it
-blocked. Toggle with `/cheats:tnt` or in the panel; shown in `/cheats:status`.
+- **Off (default) — TNT can't be duped.** TNT is treated like any other dupe-prone
+  item by the protections that already exist:
+  - *Piston protection* pops a piston that would move TNT — TNT in its push line,
+    or TNT stuck to a slime/honey block in its push line (how most TNT dupers carry
+    it). TNT that merely sits next to a piston isn't moved by it and is left alone.
+  - *Duped-item cleanup* removes extra TNT item copies that drop on the same block
+    next to a piston, exactly as it does for containers.
+  - *Nether portal protection* removes TNT items dropped into a portal, closing the
+    portal + force-quit route for TNT.
+  - *Inventory Sync* handles TNT as it always did.
+- **On — TNT can be duped.** TNT is exempt from all four, including Inventory Sync,
+  so TNT duping works by any method.
 
-Deliberately **not** wired into the dupe log or auto-ban: the sweep path passes no
-player, so it only removes the piston and alerts. Nobody gets banned over a
-mechanic many communities consider legal.
+Each protection still obeys its own toggle: if Piston Dupe Protection is off, no
+pistons are popped for TNT either. Toggle with `/cheats:tnt` or in the panel;
+shown in `/cheats:status`.
 
-The two protections are gated independently — `checkPistonSetup` takes separate
-`containerOn` / `tntOn` flags, so enabling TNT protection does not imply container
-protection and vice versa. With TNT protection off every TNT branch
-short-circuits, leaving the existing piston behaviour byte-for-byte unchanged.
+**Not breaking anything.** `checkPistonSetup` gained only an optional `tntOn`
+parameter (default `false`) and two `tntOn`-gated lines — every original line is
+unchanged. Verified by running the real function against 14 simulated block
+layouts alongside the original from `main`: with TNT duping allowed it matched the
+original in every case. The duped-item cleanup handler was exercised the same way.
+
+**Behaviour fix included.** The duped-item cleanup keyed recent drops by position
+only, so two *different* items landing on the same block within a second counted
+as a duplicated pair and the second (legitimate) one was deleted. It's now keyed by
+item type and position, which matches its documented intent and also stops a TNT
+drop from pairing with a container drop.
 
 ## Player freeze (new)
 

@@ -197,7 +197,7 @@ const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
 const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
 const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
 const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
-const TNT_PROTECTION_PROPERTY = "cheats:tntProtection";
+const ALLOW_TNT_DUPE_PROPERTY = "cheats:allowTntDupe";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
 const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold"; // legacy (kept for migration)
 const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";           // legacy
@@ -231,10 +231,12 @@ function getPistonProtectionSetting() { return world.getDynamicProperty(PISTON_P
 function setPistonProtectionSetting(v) { world.setDynamicProperty(PISTON_PROTECTION_PROPERTY, v); }
 function getPortalProtectionSetting() { return world.getDynamicProperty(PORTAL_PROTECTION_PROPERTY) ?? true; }
 function setPortalProtectionSetting(v) { world.setDynamicProperty(PORTAL_PROTECTION_PROPERTY, v); }
-// Default OFF: many servers treat TNT duping as an accepted mechanic (world
-// eaters, quarries), and blocking it also disturbs legitimate TNT contraptions.
-function getTntProtectionSetting() { return world.getDynamicProperty(TNT_PROTECTION_PROPERTY) ?? false; }
-function setTntProtectionSetting(v) { world.setDynamicProperty(TNT_PROTECTION_PROPERTY, v); }
+// Allow TNT duping. OFF (default): TNT is inside the normal dupe protections, so
+// TNT dupers are stopped and duped TNT is removed like any other duped item.
+// ON: TNT is exempt from every dupe protection and TNT duping works normally.
+// (Same idea as Paper's allow-piston-duplication, which also defaults to off.)
+function getAllowTntDupeSetting() { return world.getDynamicProperty(ALLOW_TNT_DUPE_PROPERTY) ?? false; }
+function setAllowTntDupeSetting(v) { world.setDynamicProperty(ALLOW_TNT_DUPE_PROPERTY, v); }
 function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
 // Auto-ban: when on, each confident dupe incident bans the player at the next
@@ -417,7 +419,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
                 msg += `  §f/cheats:piston §7- Toggle Piston Dupe Protection\n`;
-                msg += `  §f/cheats:tnt §7- Toggle TNT Dupe Protection (default off)\n`;
+                msg += `  §f/cheats:tnt §7- Toggle allowing TNT duping (default: not allowed)\n`;
                 msg += `  §f/cheats:portal §7- Toggle Nether Portal Dupe Protection\n`;
                 msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
                 msg += `  §f/cheats:autoban §7- Toggle auto-banning repeat dupers\n`;
@@ -465,7 +467,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
-                    `  TNT Dupe Protection: ${getTntProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  TNT Duping: ${getAllowTntDupeSetting() ? "§eALLOWED" : "§aNOT ALLOWED"}§r\n` +
                     `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Auto-Ban Repeat Dupers: ${getAutoBanSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
@@ -557,11 +559,11 @@ system.beforeEvents.startup.subscribe((init) => {
     );
 
     registry.registerCommand(
-        { name: "cheats:tnt", description: "Toggle TNT Dupe Protection", permissionLevel: CommandPermissionLevel.GameDirectors },
+        { name: "cheats:tnt", description: "Toggle allowing TNT duping (default: not allowed)", permissionLevel: CommandPermissionLevel.GameDirectors },
         (origin) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
-            system.run(() => { const v = !getTntProtectionSetting(); setTntProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r TNT Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            system.run(() => { const v = !getAllowTntDupeSetting(); setAllowTntDupeSetting(v); player.sendMessage(`§e[Anticheat]§r TNT Duping: ${v ? "§eALLOWED" : "§aNOT ALLOWED §7(duped TNT is removed)"}`); });
             return { status: 0 };
         }
     );
@@ -1019,7 +1021,7 @@ async function openTogglesMenu(player) {
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
         .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() })
         .toggle("Piston Dupe Protection", { defaultValue: getPistonProtectionSetting() })
-        .toggle("TNT Dupe Protection", { defaultValue: getTntProtectionSetting() })
+        .toggle("Allow TNT Duping (off = duped TNT removed)", { defaultValue: getAllowTntDupeSetting() })
         .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
         .toggle("Auto-ban repeat dupers (uses ban tiers)", { defaultValue: getAutoBanSetting() });
@@ -1034,7 +1036,7 @@ async function openTogglesMenu(player) {
     setBedrockProtectionSetting(!!v[5]);
     setMinecartProtectionSetting(!!v[6]);
     setPistonProtectionSetting(!!v[7]);
-    setTntProtectionSetting(!!v[8]);
+    setAllowTntDupeSetting(!!v[8]);
     setPortalProtectionSetting(!!v[9]);
     setAdminOnlyAlerts(!!v[10]);
     setAutoBanSetting(!!v[11]);
@@ -1731,15 +1733,16 @@ function scanNearbyContainers() {
     const bundleOn = getBundleBlockingSetting();
     const illegalOn = getIllegalItemsSetting();
     const pistonOn = getPistonProtectionSetting();
-    const tntOn = getTntProtectionSetting();
-    if (!bundleOn && !illegalOn && !pistonOn && !tntOn) return;
+    if (!bundleOn && !illegalOn && !pistonOn) return;
+    // TNT is checked as part of piston protection unless TNT duping is allowed.
+    const tntIncluded = pistonOn && !getAllowTntDupeSetting();
 
     for (const player of world.getPlayers()) {
         try {
             const isAdmin = player.hasTag("admin");
             // Admins bypass illegal-item sweeping; bundle/piston protection applies to everyone.
             const scanIllegal = illegalOn && !isAdmin;
-            if (!bundleOn && !scanIllegal && !pistonOn && !tntOn) continue;
+            if (!bundleOn && !scanIllegal && !pistonOn) continue;
 
             const pos = player.location;
             const dimension = player.dimension;
@@ -1751,7 +1754,7 @@ function scanNearbyContainers() {
                             const block = dimension.getBlock({ x: baseX + dx, y: baseY + dy, z: baseZ + dz });
                             if (!block) continue;
                             const typeId = block.typeId;
-                            if ((pistonOn || tntOn) && isPistonType(typeId)) { checkPistonSetup(block, dimension, pistonOn, tntOn); continue; }
+                            if (pistonOn && isPistonType(typeId)) { checkPistonSetup(block, dimension, tntIncluded); continue; }
                             const doBundle = bundleOn && isBundleScanContainer(typeId);
                             const doIllegal = scanIllegal && isIllegalScanContainer(typeId);
                             if (!doBundle && !doIllegal) continue;
@@ -1913,7 +1916,10 @@ function runSpawnCheck(player) {
         if (!container) return; // still loading; re-checking later is safe
         const currentMap = getPlayerInventoryMap(player);
         let detectedDupe = false;
+        const allowTnt = getAllowTntDupeSetting();
         for (const typeId in currentMap) {
+            // TNT duping allowed: TNT gained while offline isn't treated as a dupe.
+            if (allowTnt && isTntBlock(typeId)) continue;
             const currentCount = currentMap[typeId];
             const savedCount = savedMap[typeId] || 0;
             if (currentCount > savedCount) {
@@ -2168,10 +2174,16 @@ function neutralizePistonSetup(pistonBlock, containerName, player) {
     } catch (e) {}
 }
 
-// TNT dupers work by having a piston move a TNT block, so TNT is treated the
-// same way containers are: a piston positioned to push one is the setup.
+// TNT dupers work by a piston moving a TNT block — either directly, or stuck to a
+// slime/honey block that is being pushed. TNT uses the same id as block and item.
 function isTntBlock(typeId) {
     return typeId === "minecraft:tnt" || typeId === "minecraft:underwater_tnt";
+}
+
+// Sticky blocks drag their neighbours along when pushed; most TNT dupers carry
+// the TNT this way.
+function isStickyBlock(typeId) {
+    return typeId === "minecraft:slime" || typeId === "minecraft:honey_block";
 }
 
 // True if any of the 6 blocks touching (x,y,z) is TNT.
@@ -2204,14 +2216,12 @@ function hasAdjacentShulker(dimension, x, y, z) {
 // virtually never a legit build). We still trace the push line as a bonus so a
 // container behind a pushed block (e.g. a lightning rod), or a chest/barrel in
 // the push path, is caught too.
-// containerOn / tntOn are passed in by the caller so each protection is gated
-// independently — turning TNT protection on must not imply container protection,
-// and vice versa. Both default to the historical behaviour (containers only).
-function checkPistonSetup(pistonBlock, dimension, containerOn = true, tntOn = false) {
+// tntOn: whether TNT counts as dupe-prone, i.e. TNT duping is NOT allowed. With it
+// false (the default) this behaves exactly as it did before TNT support existed.
+function checkPistonSetup(pistonBlock, dimension, tntOn = false) {
     try {
         const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
-        if (containerOn && hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
-        if (tntOn && hasAdjacentTnt(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
+        if (hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
         const off = pistonFacingOffset(pistonBlock);
         if (!off) return; // push-line bonus needs facing; adjacency above already ran
         for (let i = 1; i <= 12; i++) {
@@ -2219,10 +2229,13 @@ function checkPistonSetup(pistonBlock, dimension, containerOn = true, tntOn = fa
             const b = dimension.getBlock({ x: cx, y: cy, z: cz });
             if (!b) return;
             const t = b.typeId;
-            if (containerOn && isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+            if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+            if (hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+            // TNT only counts when this piston would actually move it: in the push
+            // line, or stuck to a slime/honey block in the push line. TNT that merely
+            // sits next to a piston isn't moved by it, so it's left alone.
             if (tntOn && isTntBlock(t)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
-            if (containerOn && hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
-            if (tntOn && hasAdjacentTnt(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
+            if (tntOn && isStickyBlock(t) && hasAdjacentTnt(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
             if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
         }
     } catch (e) {}
@@ -2290,11 +2303,16 @@ world.afterEvents.entitySpawn.subscribe((event) => {
         const ent = event.entity;
         if (!ent || ent.typeId !== "minecraft:item") return;
         const stack = ent.getComponent("minecraft:item")?.itemStack;
-        if (!stack || !isPistonDupeContainer(stack.typeId)) return;
+        if (!stack) return;
+        const id = stack.typeId;
+        // Containers always; TNT as well unless TNT duping is allowed.
+        if (!isPistonDupeContainer(id) && !(isTntBlock(id) && !getAllowTntDupeSetting())) return;
         const dimension = ent.dimension;
         const loc = ent.location;
         if (!pistonWithin(dimension, loc, 3)) return; // only near a piston
-        const key = `${Math.floor(loc.x)},${Math.floor(loc.y)},${Math.floor(loc.z)}`;
+        // Keyed by item type as well as position, so two *different* items landing
+        // on the same block never count as one duplicated pair.
+        const key = `${id}@${Math.floor(loc.x)},${Math.floor(loc.y)},${Math.floor(loc.z)}`;
         const count = (recentContainerDrops.get(key) || 0) + 1;
         recentContainerDrops.set(key, count);
         if (count === 1) {
@@ -2319,6 +2337,7 @@ world.afterEvents.entitySpawn.subscribe((event) => {
 // essentially never tossed through portals in normal play (you carry them).
 function scanPortalItems() {
     if (!getPortalProtectionSetting()) return;
+    const allowTnt = getAllowTntDupeSetting();
     for (const player of world.getPlayers()) {
         const dimension = player.dimension;
         let items;
@@ -2327,7 +2346,9 @@ function scanPortalItems() {
         for (const ent of items) {
             try {
                 const stack = ent.getComponent("minecraft:item")?.itemStack;
-                if (!stack || !isPistonDupeContainer(stack.typeId)) continue;
+                if (!stack) continue;
+                // Containers always; TNT as well unless TNT duping is allowed.
+                if (!isPistonDupeContainer(stack.typeId) && !(isTntBlock(stack.typeId) && !allowTnt)) continue;
                 const block = dimension.getBlock(ent.location);
                 if (!block || block.typeId !== "minecraft:portal") continue; // nether portal block
                 const loc = { x: ent.location.x, y: ent.location.y, z: ent.location.z };
