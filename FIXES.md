@@ -228,6 +228,29 @@ per player per flush. The 20-tick full sweep is kept as a backstop in case a cha
 ever lands without firing the event, and the subscription is wrapped so a build
 without the event degrades to the timer instead of failing to load.
 
+## TNT dupe protection (new, default OFF)
+
+Optional protection against TNT dupers, which work by having a piston move a TNT
+block. Detection reuses the existing piston sweep: a piston positioned to push
+TNT — directly adjacent, in its push line, or adjacent to a block in that line —
+has the **piston** popped off and returned as an item, exactly as the container
+version does. Covers `minecraft:tnt` and `minecraft:underwater_tnt`.
+
+**Default off on purpose.** Plenty of servers treat TNT duping as an accepted
+mechanic (world eaters, quarries), and the detection cannot tell a duper from a
+legitimate TNT cannon or any other contraption that pushes TNT with a piston —
+both get the piston popped. It is opt-in for servers that actually want it
+blocked. Toggle with `/cheats:tnt` or in the panel; shown in `/cheats:status`.
+
+Deliberately **not** wired into the dupe log or auto-ban: the sweep path passes no
+player, so it only removes the piston and alerts. Nobody gets banned over a
+mechanic many communities consider legal.
+
+The two protections are gated independently — `checkPistonSetup` takes separate
+`containerOn` / `tntOn` flags, so enabling TNT protection does not imply container
+protection and vice versa. With TNT protection off every TNT branch
+short-circuits, leaving the existing piston behaviour byte-for-byte unchanged.
+
 ## Player freeze (new)
 
 Admins can freeze a player in place for questioning: `/cheats:freeze <player>`,

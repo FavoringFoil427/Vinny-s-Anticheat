@@ -197,6 +197,7 @@ const BEDROCK_PROTECTION_PROPERTY = "cheats:bedrockProtection";
 const MINECART_PROTECTION_PROPERTY = "cheats:minecartProtection";
 const PISTON_PROTECTION_PROPERTY = "cheats:pistonProtection";
 const PORTAL_PROTECTION_PROPERTY = "cheats:portalProtection";
+const TNT_PROTECTION_PROPERTY = "cheats:tntProtection";
 const ADMIN_ONLY_ALERTS_PROPERTY = "cheats:adminOnlyAlerts";
 const ESCALATION_THRESHOLD_PROPERTY = "cheats:escalationThreshold"; // legacy (kept for migration)
 const ESCALATION_KICK_PROPERTY = "cheats:escalationKick";           // legacy
@@ -230,6 +231,10 @@ function getPistonProtectionSetting() { return world.getDynamicProperty(PISTON_P
 function setPistonProtectionSetting(v) { world.setDynamicProperty(PISTON_PROTECTION_PROPERTY, v); }
 function getPortalProtectionSetting() { return world.getDynamicProperty(PORTAL_PROTECTION_PROPERTY) ?? true; }
 function setPortalProtectionSetting(v) { world.setDynamicProperty(PORTAL_PROTECTION_PROPERTY, v); }
+// Default OFF: many servers treat TNT duping as an accepted mechanic (world
+// eaters, quarries), and blocking it also disturbs legitimate TNT contraptions.
+function getTntProtectionSetting() { return world.getDynamicProperty(TNT_PROTECTION_PROPERTY) ?? false; }
+function setTntProtectionSetting(v) { world.setDynamicProperty(TNT_PROTECTION_PROPERTY, v); }
 function getAdminOnlyAlerts() { return world.getDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY) ?? false; }
 function setAdminOnlyAlerts(v) { world.setDynamicProperty(ADMIN_ONLY_ALERTS_PROPERTY, v); }
 // Auto-ban: when on, each confident dupe incident bans the player at the next
@@ -412,6 +417,7 @@ system.beforeEvents.startup.subscribe((init) => {
                 msg += `  §f/cheats:bedrock §7- Toggle Bedrock Break Protection\n`;
                 msg += `  §f/cheats:minecart §7- Toggle Minecart Chest Dupe Detection\n`;
                 msg += `  §f/cheats:piston §7- Toggle Piston Dupe Protection\n`;
+                msg += `  §f/cheats:tnt §7- Toggle TNT Dupe Protection (default off)\n`;
                 msg += `  §f/cheats:portal §7- Toggle Nether Portal Dupe Protection\n`;
                 msg += `  §f/cheats:alerts §7- Toggle Admin-Only Alerts\n`;
                 msg += `  §f/cheats:autoban §7- Toggle auto-banning repeat dupers\n`;
@@ -459,6 +465,7 @@ system.beforeEvents.startup.subscribe((init) => {
                     `  Bedrock Break Protection: ${getBedrockProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Minecart Chest Dupe Detection: ${getMinecartProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Piston Dupe Protection: ${getPistonProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
+                    `  TNT Dupe Protection: ${getTntProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Nether Portal Dupe Protection: ${getPortalProtectionSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Admin-Only Alerts: ${getAdminOnlyAlerts() ? "§aENABLED" : "§cDISABLED"}§r\n` +
                     `  Auto-Ban Repeat Dupers: ${getAutoBanSetting() ? "§aENABLED" : "§cDISABLED"}§r\n` +
@@ -545,6 +552,16 @@ system.beforeEvents.startup.subscribe((init) => {
             const player = origin.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") return { status: 0 };
             system.run(() => { const v = !getPistonProtectionSetting(); setPistonProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r Piston Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
+            return { status: 0 };
+        }
+    );
+
+    registry.registerCommand(
+        { name: "cheats:tnt", description: "Toggle TNT Dupe Protection", permissionLevel: CommandPermissionLevel.GameDirectors },
+        (origin) => {
+            const player = origin.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") return { status: 0 };
+            system.run(() => { const v = !getTntProtectionSetting(); setTntProtectionSetting(v); player.sendMessage(`§e[Anticheat]§r TNT Dupe Protection: ${v ? "§aENABLED" : "§cDISABLED"}`); });
             return { status: 0 };
         }
     );
@@ -1002,6 +1019,7 @@ async function openTogglesMenu(player) {
         .toggle("Bedrock Break Protection", { defaultValue: getBedrockProtectionSetting() })
         .toggle("Minecart Chest Dupe Detection", { defaultValue: getMinecartProtectionSetting() })
         .toggle("Piston Dupe Protection", { defaultValue: getPistonProtectionSetting() })
+        .toggle("TNT Dupe Protection", { defaultValue: getTntProtectionSetting() })
         .toggle("Nether Portal Dupe Protection", { defaultValue: getPortalProtectionSetting() })
         .toggle("Admin-Only Alerts", { defaultValue: getAdminOnlyAlerts() })
         .toggle("Auto-ban repeat dupers (uses ban tiers)", { defaultValue: getAutoBanSetting() });
@@ -1016,9 +1034,10 @@ async function openTogglesMenu(player) {
     setBedrockProtectionSetting(!!v[5]);
     setMinecartProtectionSetting(!!v[6]);
     setPistonProtectionSetting(!!v[7]);
-    setPortalProtectionSetting(!!v[8]);
-    setAdminOnlyAlerts(!!v[9]);
-    setAutoBanSetting(!!v[10]);
+    setTntProtectionSetting(!!v[8]);
+    setPortalProtectionSetting(!!v[9]);
+    setAdminOnlyAlerts(!!v[10]);
+    setAutoBanSetting(!!v[11]);
     player.sendMessage("§e[Anticheat]§r Settings updated.");
 }
 
@@ -1712,14 +1731,15 @@ function scanNearbyContainers() {
     const bundleOn = getBundleBlockingSetting();
     const illegalOn = getIllegalItemsSetting();
     const pistonOn = getPistonProtectionSetting();
-    if (!bundleOn && !illegalOn && !pistonOn) return;
+    const tntOn = getTntProtectionSetting();
+    if (!bundleOn && !illegalOn && !pistonOn && !tntOn) return;
 
     for (const player of world.getPlayers()) {
         try {
             const isAdmin = player.hasTag("admin");
             // Admins bypass illegal-item sweeping; bundle/piston protection applies to everyone.
             const scanIllegal = illegalOn && !isAdmin;
-            if (!bundleOn && !scanIllegal && !pistonOn) continue;
+            if (!bundleOn && !scanIllegal && !pistonOn && !tntOn) continue;
 
             const pos = player.location;
             const dimension = player.dimension;
@@ -1731,7 +1751,7 @@ function scanNearbyContainers() {
                             const block = dimension.getBlock({ x: baseX + dx, y: baseY + dy, z: baseZ + dz });
                             if (!block) continue;
                             const typeId = block.typeId;
-                            if (pistonOn && isPistonType(typeId)) { checkPistonSetup(block, dimension); continue; }
+                            if ((pistonOn || tntOn) && isPistonType(typeId)) { checkPistonSetup(block, dimension, pistonOn, tntOn); continue; }
                             const doBundle = bundleOn && isBundleScanContainer(typeId);
                             const doIllegal = scanIllegal && isIllegalScanContainer(typeId);
                             if (!doBundle && !doIllegal) continue;
@@ -2148,6 +2168,24 @@ function neutralizePistonSetup(pistonBlock, containerName, player) {
     } catch (e) {}
 }
 
+// TNT dupers work by having a piston move a TNT block, so TNT is treated the
+// same way containers are: a piston positioned to push one is the setup.
+function isTntBlock(typeId) {
+    return typeId === "minecraft:tnt" || typeId === "minecraft:underwater_tnt";
+}
+
+// True if any of the 6 blocks touching (x,y,z) is TNT.
+function hasAdjacentTnt(dimension, x, y, z) {
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    for (const [dx, dy, dz] of dirs) {
+        try {
+            const b = dimension.getBlock({ x: x + dx, y: y + dy, z: z + dz });
+            if (b && isTntBlock(b.typeId)) return true;
+        } catch (e) {}
+    }
+    return false;
+}
+
 // True if any of the 6 blocks touching (x,y,z) is a shulker box.
 function hasAdjacentShulker(dimension, x, y, z) {
     const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -2166,10 +2204,14 @@ function hasAdjacentShulker(dimension, x, y, z) {
 // virtually never a legit build). We still trace the push line as a bonus so a
 // container behind a pushed block (e.g. a lightning rod), or a chest/barrel in
 // the push path, is caught too.
-function checkPistonSetup(pistonBlock, dimension) {
+// containerOn / tntOn are passed in by the caller so each protection is gated
+// independently — turning TNT protection on must not imply container protection,
+// and vice versa. Both default to the historical behaviour (containers only).
+function checkPistonSetup(pistonBlock, dimension, containerOn = true, tntOn = false) {
     try {
         const px = pistonBlock.location.x, py = pistonBlock.location.y, pz = pistonBlock.location.z;
-        if (hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+        if (containerOn && hasAdjacentShulker(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+        if (tntOn && hasAdjacentTnt(dimension, px, py, pz)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
         const off = pistonFacingOffset(pistonBlock);
         if (!off) return; // push-line bonus needs facing; adjacency above already ran
         for (let i = 1; i <= 12; i++) {
@@ -2177,8 +2219,10 @@ function checkPistonSetup(pistonBlock, dimension) {
             const b = dimension.getBlock({ x: cx, y: cy, z: cz });
             if (!b) return;
             const t = b.typeId;
-            if (isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
-            if (hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+            if (containerOn && isPistonDupeContainer(t)) { neutralizePistonSetup(pistonBlock, t.replace("minecraft:", ""), null); return; }
+            if (tntOn && isTntBlock(t)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
+            if (containerOn && hasAdjacentShulker(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "shulker_box", null); return; }
+            if (tntOn && hasAdjacentTnt(dimension, cx, cy, cz)) { neutralizePistonSetup(pistonBlock, "TNT", null); return; }
             if (isImmovableForPiston(t)) return; // air/obsidian/gap — nothing pushed past here
         }
     } catch (e) {}
